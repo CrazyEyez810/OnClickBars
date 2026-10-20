@@ -691,35 +691,46 @@ function OneClickBars_Load()
         return
     end
     DoLoad(false)
-    if UnitLevel("player") <= 1 and DB.resetGuide ~= false then
-        ResetGuideLater()
+    if UnitLevel("player") <= 1 then
+        if DB.resetGuide ~= false then ResetGuideLater() end
+        if DB.levelingSetup ~= false then C_Timer.After(1, OneClickBars_Setup) end
     end
 end
 
+local UndoSetup -- set in the leveling setup section
+
 function OneClickBars_Undo()
-    local snap = CHAR.undo
-    if not snap then
+    local snap, setup = CHAR.undo, CHAR.setupUndo
+    if not snap and not setup then
         Print("Nothing to undo.")
         return
     end
     if InCombatLockdown() then
-        Print("Can't change action bars in combat.")
+        Print("Can't change action bars or settings in combat.")
         return
     end
-    local done = WithApplying(function()
-        ApplySlots(snap.slots, NewContext(true))
-        ApplyBindings(snap.bindings)
-        ApplyBars(snap.bars)
-        local c = snap.char or {}
-        CHAR.applied = c.applied
-        CHAR.profile = c.profile
-        CHAR.filled = c.filled or {}
-        CHAR.userSlots = c.userSlots or {}
-        return true
-    end)
-    if done then
-        CHAR.undo = nil
-        Print("Restored your bars and keybindings from before the last load.")
+    if snap then
+        local done = WithApplying(function()
+            ApplySlots(snap.slots, NewContext(true))
+            ApplyBindings(snap.bindings)
+            ApplyBars(snap.bars)
+            local c = snap.char or {}
+            CHAR.applied = c.applied
+            CHAR.profile = c.profile
+            CHAR.filled = c.filled or {}
+            CHAR.userSlots = c.userSlots or {}
+            return true
+        end)
+        if done then
+            CHAR.undo = nil
+            Print("Restored your bars and keybindings from before the last load.")
+        end
+    end
+    if setup then
+        UndoSetup(setup)
+        CHAR.setupUndo = nil
+        CHAR.setupDone = nil
+        Print("Restored the game and RestedXP settings from before the leveling setup.")
     end
     OneClickBars_UpdateStatus()
 end
@@ -900,6 +911,141 @@ ResetGuideLater = function()
     if GetRXP() then C_Timer.After(2, function() ResetGuide(1) end) end
 end
 
+-- Leveling setup ----------------------------------------------------------
+
+-- Client settings that cut clicks while leveling. Names and defaults checked
+-- against the Forever 1.60.1 CVar list. CVars missing on a client are skipped.
+local LEVELING_CVARS = {
+    { "SoftTargetInteract", "3" },            -- interact key works with keyboard and mouse
+    { "SoftTargetIconGameObject", "1" },      -- icons on quest objects and chests
+    { "SoftTargetInteractArc", "1" },         -- interact with objects in a forward arc
+    { "autoLootDefault", "1" },
+    { "lootUnderMouse", "1" },
+    { "autoQuestWatch", "1" },
+    { "autoQuestProgress", "1" },
+    { "instantQuestText", "1" },
+    { "showQuestLevel", "1" },                -- saved per character
+    { "nameplateShowEnemies", "1" },
+    { "nameplateTargetRadialPosition", "1" }, -- keep the target's plate on screen
+    { "enableFloatingCombatText", "1" },
+    { "xpBarText", "1" },
+    { "autoDismount", "1" },
+    { "autoStand", "1" },
+}
+
+-- RestedXP options that are off on new characters.
+local RXP_SWITCHES = { "enableTrainerAutomation", "enableQuestRewardAutomation", "autoSellJunk" }
+
+local GetCVarValue = (C_CVar and C_CVar.GetCVar) or GetCVar
+local SetCVarValue = (C_CVar and C_CVar.SetCVar) or SetCVar
+local pendingSetup = false
+
+local function RXPProfile()
+    local rxp = GetRXP()
+    return rxp and rxp.settings and rxp.settings.profile
+end
+
+local function DoLevelingSetup(quiet)
+    if InCombatLockdown() then
+        -- Some of these CVars can't be changed in combat.
+        pendingSetup = true
+        if not quiet then Print("In combat. Leveling setup will run when combat ends.") end
+        return
+    end
+
+    local undo = CHAR.setupUndo or { cvars = {}, rxp = {} }
+    local changed = 0
+    for _, pair in ipairs(LEVELING_CVARS) do
+        local name, value = pair[1], pair[2]
+        local current = GetCVarValue(name)
+        if current ~= nil and current ~= value then
+            pcall(SetCVarValue, name, value)
+            if GetCVarValue(name) == value then
+                if undo.cvars[name] == nil then undo.cvars[name] = current end
+                changed = changed + 1
+            end
+        end
+    end
+
+    local rxpProfile = RXPProfile()
+    local switched = 0
+    if rxpProfile then
+        for _, key in ipairs(RXP_SWITCHES) do
+            if not rxpProfile[key] then
+                if undo.rxp[key] == nil then undo.rxp[key] = rxpProfile[key] or false end
+                rxpProfile[key] = true
+                switched = switched + 1
+            end
+        end
+    end
+
+    if next(undo.cvars) or next(undo.rxp) then CHAR.setupUndo = undo end
+    CHAR.setupDone = true
+
+    if changed + switched > 0 or not quiet then
+        local msg = ("Leveling setup: %d game settings changed."):format(changed)
+        if rxpProfile then
+            msg = msg .. (" RestedXP trainer, quest reward and junk automation on (%d changed)."):format(switched)
+        end
+        Print(msg)
+    end
+    if not GetBindingKey("INTERACTTARGET") then
+        Print("Bind a key to \"Interact With Target\" in Key Bindings. It talks to NPCs, loots and clicks quest objects.")
+    end
+    local lea = _G.LeaPlusDB
+    if lea and rxpProfile then
+        if lea.AutomateQuests == "On" and rxpProfile.enableQuestAutomation then
+            Print("Leatrix Plus and RestedXP both accept quests. Turn off \"Automate quests\" in Leatrix so you only take guide quests.")
+        end
+        if lea.AutoSellJunk == "On" and rxpProfile.autoSellJunk then
+            Print("Leatrix Plus and RestedXP both sell junk. Turn off \"Sell junk automatically\" in Leatrix.")
+        end
+    end
+    OneClickBars_UpdateStatus()
+end
+
+function OneClickBars_Setup()
+    DoLevelingSetup(false)
+end
+
+UndoSetup = function(undo)
+    for name, value in pairs(undo.cvars or {}) do
+        pcall(SetCVarValue, name, value)
+    end
+    local rxpProfile = RXPProfile()
+    if rxpProfile then
+        for key, value in pairs(undo.rxp or {}) do
+            rxpProfile[key] = value
+        end
+    end
+end
+
+-- Talent reminders --------------------------------------------------------
+
+-- Most-picked Forever Enhancement leveling order (talentsforever.com,
+-- October 2026). Forever reworked the trees, so Classic orders don't apply.
+local TALENT_TIPS = {
+    SHAMAN = {
+        [10] = "Thundering Strikes", [11] = "Thundering Strikes", [12] = "Thundering Strikes",
+        [13] = "Thundering Strikes", [14] = "Thundering Strikes",
+        [15] = "Mental Dexterity", [16] = "Mental Dexterity", [17] = "Mental Dexterity",
+        [18] = "Improved Ghost Wolf", [19] = "Improved Ghost Wolf",
+        [20] = "Shamanistic Focus",
+    },
+}
+
+local function TalentTip(level)
+    if DB.talentTips == false then return end
+    local tips = TALENT_TIPS[(ClassKey())]
+    local talent = tips and tips[level]
+    if not talent then return end
+    local text = ("Level %d: put your talent point in %s."):format(level, talent)
+    Print(text)
+    if RaidNotice_AddMessage and RaidWarningFrame and ChatTypeInfo then
+        RaidNotice_AddMessage(RaidWarningFrame, text, ChatTypeInfo["RAID_WARNING"])
+    end
+end
+
 -- Window ------------------------------------------------------------------
 
 local frame
@@ -931,7 +1077,7 @@ function OneClickBars_UpdateStatus()
     local multiple = #SortedNames(ClassProfiles()) > 1
     frame.prev:SetEnabled(multiple)
     frame.next:SetEnabled(multiple)
-    frame.undo:SetEnabled(CHAR and CHAR.undo ~= nil)
+    frame.undo:SetEnabled(CHAR ~= nil and (CHAR.undo ~= nil or CHAR.setupUndo ~= nil))
 end
 
 local function Button(parent, text, width, height, onClick)
@@ -945,7 +1091,7 @@ end
 local function CreateWindow()
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
     frame = CreateFrame("Frame", "OneClickBarsFrame", UIParent, template)
-    frame:SetSize(240, 258)
+    frame:SetSize(240, 290)
     frame:SetFrameStrata("MEDIUM")
     frame:SetClampedToScreen(true)
     frame:SetMovable(true)
@@ -1002,11 +1148,14 @@ local function CreateWindow()
     local new = Button(frame, "New profile", 98, 26, OneClickBars_NewProfile)
     new:SetPoint("TOPRIGHT", load, "BOTTOMRIGHT", 0, -6)
 
-    frame.undo = Button(frame, "Undo last load", 200, 26, OneClickBars_Undo)
+    frame.undo = Button(frame, "Undo", 200, 26, OneClickBars_Undo)
     frame.undo:SetPoint("TOP", load, "BOTTOM", 0, -38)
 
+    local setup = Button(frame, "Leveling setup", 200, 26, OneClickBars_Setup)
+    setup:SetPoint("TOP", frame.undo, "BOTTOM", 0, -6)
+
     local guide = Button(frame, "Reset RestedXP guide", 200, 26, OneClickBars_ResetGuide)
-    guide:SetPoint("TOP", frame.undo, "BOTTOM", 0, -6)
+    guide:SetPoint("TOP", setup, "BOTTOM", 0, -6)
 
     frame.status = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     frame.status:SetPoint("TOP", guide, "BOTTOM", 0, -8)
@@ -1085,7 +1234,8 @@ end
 
 _G.BINDING_HEADER_ONECLICKBARS = "OneClickBars"
 _G.BINDING_NAME_ONECLICKBARS_LOAD = "Load action bars"
-_G.BINDING_NAME_ONECLICKBARS_UNDO = "Undo last load"
+_G.BINDING_NAME_ONECLICKBARS_UNDO = "Undo last load and setup"
+_G.BINDING_NAME_ONECLICKBARS_SETUP = "Leveling setup"
 _G.BINDING_NAME_ONECLICKBARS_RESETGUIDE = "Reset RestedXP guide"
 _G.BINDING_NAME_ONECLICKBARS_TOGGLE = "Show or hide the window"
 
@@ -1162,11 +1312,20 @@ SlashCmdList.ONECLICKBARS = function(input)
         Print("Reset RestedXP guide on level 1 characters: " .. argLower)
     elseif cmd == "guide" then
         OneClickBars_ResetGuide()
+    elseif cmd == "setup" and (argLower == "on" or argLower == "off") then
+        DB.levelingSetup = argLower == "on"
+        Print("Leveling setup on new level 1 characters: " .. argLower)
+    elseif cmd == "setup" then
+        OneClickBars_Setup()
+    elseif cmd == "talents" then
+        DB.talentTips = OnOff(argLower)
+        Print("Talent reminders: " .. (DB.talentTips and "on" or "off"))
     elseif cmd == "delete" then
         DeleteSelected()
     else
         Print("/1cb (show/hide), load, save, undo, new [name], use <name>, list, delete, scale 1.5, "
-            .. "auto on|off, keys on|off, intro on|off, new on|off, guide, guide here, guide on|off")
+            .. "auto on|off, keys on|off, intro on|off, new on|off, setup, setup on|off, talents on|off, "
+            .. "guide, guide here, guide on|off")
     end
 end
 
@@ -1180,6 +1339,7 @@ events:RegisterEvent("SPELLS_CHANGED")
 events:RegisterEvent("BAG_UPDATE_DELAYED")
 events:RegisterEvent("UNIT_PET")
 events:RegisterEvent("CINEMATIC_START")
+events:RegisterEvent("PLAYER_LEVEL_UP")
 pcall(events.RegisterEvent, events, "PLAY_MOVIE")
 pcall(events.RegisterEvent, events, "LEARNED_SPELL_IN_TAB")
 pcall(events.RegisterEvent, events, "LEARNED_SPELL_IN_SKILL_LINE")
@@ -1219,11 +1379,20 @@ events:SetScript("OnEvent", function(_, event, arg1)
             if DB.resetGuide ~= false and GetRXP() then
                 C_Timer.After(5, function() ResetGuide(1) end)
             end
+            if DB.levelingSetup ~= false then
+                C_Timer.After(6, function() DoLevelingSetup(true) end)
+            end
         elseif CHAR.applied then
             QueueAutoFill()
             QueuePetBar()
         end
+    elseif event == "PLAYER_LEVEL_UP" then
+        TalentTip(arg1)
     elseif event == "PLAYER_REGEN_ENABLED" then
+        if pendingSetup then
+            pendingSetup = false
+            DoLevelingSetup(true)
+        end
         local pending = pendingAfterCombat
         pendingAfterCombat = nil
         if pending == "load" then

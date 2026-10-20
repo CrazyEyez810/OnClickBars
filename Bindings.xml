@@ -5,6 +5,9 @@
 	<Binding name="ONECLICKBARS_UNDO" category="ADDONS">
 		OneClickBars_Undo()
 	</Binding>
+	<Binding name="ONECLICKBARS_SETUP" category="ADDONS">
+		OneClickBars_Setup()
+	</Binding>
 	<Binding name="ONECLICKBARS_RESETGUIDE" category="ADDONS">
 		OneClickBars_ResetGuide()
 	</Binding>

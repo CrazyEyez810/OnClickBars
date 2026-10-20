@@ -8,7 +8,9 @@ A World of Warcraft addon for WoW Forever. Set up your action bars once, then co
 2. On another character of the same class, click "Load bars".
 3. New level 1 characters load their class profile automatically on first login, and the opening cinematic is skipped.
 4. Spells you haven't learned yet are placed in their saved slot as soon as you learn them, including higher ranks. Slots you change by hand are left alone.
-5. "Undo last load" puts back the bars and keybindings you had before the last load.
+5. "Leveling setup" turns on the interact key, auto loot, quest levels, enemy nameplates, XP numbers on the bar and other leveling settings, and switches on RestedXP's trainer, quest reward and junk automation. It runs by itself on new level 1 characters and warns if Leatrix Plus and RestedXP both automate quests or junk selling.
+6. Shaman get an on-screen talent reminder at each level from 10 to 20.
+7. "Undo" puts back the bars, keybindings and settings you had before the last load and leveling setup.
 
 Each class can have several profiles (for example leveling and raid). Use the arrows in the window to pick one, and "New profile" to add one.
 
@@ -30,10 +32,12 @@ If RestedXP Guides is installed, new level 1 characters start at step 1 of the 0
 - `/1cb auto off` stop placing new spells as you learn them
 - `/1cb keys off` stop copying keybindings
 - `/1cb intro off` stop skipping the opening cinematic
+- `/1cb setup` run the leveling setup, `/1cb setup off` stop running it on new characters
+- `/1cb talents off` stop the talent reminders
 - `/1cb new off` stop auto-loading on new characters
 - `/1cb guide off` stop the RestedXP reset on new characters
 
-Key bindings for "Load action bars", "Undo last load" and "Reset RestedXP guide" are under Key Bindings, AddOns.
+Key bindings for "Load action bars", "Undo", "Leveling setup" and "Reset RestedXP guide" are under Key Bindings, AddOns.
 
 ## Releases
 
