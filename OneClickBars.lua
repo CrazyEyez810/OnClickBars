@@ -505,9 +505,9 @@ if PickupAction then hooksecurefunc("PickupAction", MarkUserSlot) end
 
 -- Settings that belong to the machine, the login or the realm, not the UI.
 local CVAR_SKIP = {
-    "^gx", "^hw", "^last", "[Rr]ealm", "[Aa]ccount", "^portal", "^agent", "^launcher",
+    "^[Gg]x", "^hw", "^last", "[Rr]ealm", "[Aa]ccount", "^portal", "^agent", "^launcher",
     "^read[A-Z]", "Locale$", "^Sound_.*Device", "^Sound_OutputDriver", "^videoOptionsVersion",
-    "^processAffinity", "^cameraSaved", "^webChallenge",
+    "^processAffinity", "^cameraSaved", "^webChallenge", "^currentGameMode", "^engineSurvey",
 }
 
 -- Per-character saved variables of addons whose layout should carry over
@@ -585,6 +585,7 @@ local function ApplyCVars(saved, undo)
     if not (C_CVar and C_CVar.GetCVarInfo) then return 0, 0 end
     for name, value in pairs(saved or {}) do
         local ok, current, _, _, _, locked, secure, readOnly = pcall(C_CVar.GetCVarInfo, name)
+        if SkipCVar(name) then ok = false end
         if ok and current ~= nil and not IsSecret(current) and current ~= value and not locked and not readOnly then
             if secure and InCombatLockdown() then
                 waiting = waiting + 1
