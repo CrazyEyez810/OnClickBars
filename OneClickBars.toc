@@ -1,7 +1,7 @@
 ## Interface: 16001, 11509
 ## Title: OneClickBars
 ## Notes: Save your action bars once per class, then load them on any character on the account with one button.
-## Version: 1.1.0
+## Version: 1.2.0
 ## OptionalDeps: RXPGuides
 ## SavedVariables: OneClickBarsDB
 ## SavedVariablesPerCharacter: OneClickBarsChar

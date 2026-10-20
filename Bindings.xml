@@ -2,6 +2,9 @@
 	<Binding name="ONECLICKBARS_LOAD" header="ONECLICKBARS" category="ADDONS">
 		OneClickBars_Load()
 	</Binding>
+	<Binding name="ONECLICKBARS_UNDO" category="ADDONS">
+		OneClickBars_Undo()
+	</Binding>
 	<Binding name="ONECLICKBARS_RESETGUIDE" category="ADDONS">
 		OneClickBars_ResetGuide()
 	</Binding>

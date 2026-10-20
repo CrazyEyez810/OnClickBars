@@ -1,12 +1,14 @@
 -- OneClickBars
--- Save the action bars of one character as the profile for its class, then
+-- Save the action bars of one character as a profile for its class, then
 -- load that profile on any other character of the same class on the account.
 -- After a load, spells you have not learned yet are placed in their saved
 -- slot the moment you learn them.
 
 local ADDON = ...
 
+local SCHEMA = 2
 local MAX_SLOTS = 180
+local NUM_PET_SLOTS = _G.NUM_PET_ACTION_SLOTS or 10
 
 local PickupSpell = (C_Spell and C_Spell.PickupSpell) or _G.PickupSpell
 local PickupItem = (C_Item and C_Item.PickupItem) or _G.PickupItem
@@ -23,8 +25,12 @@ local MAX_CHARACTER_MACROS = _G.MAX_CHARACTER_MACROS
 local DB, CHAR
 local isNewCharacter = false
 local pendingAfterCombat = nil
-local ResetGuideLater -- set in the RestedXP section
 local autoFillQueued = false
+local petQueued = false
+local petDoneThisSession = {}
+-- True while this addon is moving actions, so the hooks below can tell our
+-- changes apart from the player's.
+local applying = false
 
 local function Print(msg)
     DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99OneClickBars:|r " .. msg)
@@ -37,6 +43,72 @@ end
 
 local function CharName()
     return UnitName("player") .. "-" .. (GetRealmName() or "")
+end
+
+-- Runs fn with the applying flag set and always clears it, even on error.
+local function WithApplying(fn, ...)
+    applying = true
+    local ok, a, b = pcall(fn, ...)
+    applying = false
+    ClearCursor()
+    if not ok then
+        Print("Error: " .. tostring(a))
+        return nil
+    end
+    return a, b
+end
+
+-- Profiles ----------------------------------------------------------------
+
+local function SortedNames(list)
+    local names = {}
+    for name in pairs(list) do names[#names + 1] = name end
+    table.sort(names)
+    return names
+end
+
+local function ClassProfiles()
+    local classFile = ClassKey()
+    DB.profiles[classFile] = DB.profiles[classFile] or {}
+    return DB.profiles[classFile]
+end
+
+-- The profile picked in the window for this class, or the first one.
+local function SelectedName()
+    local list = ClassProfiles()
+    local name = DB.selected[(ClassKey())]
+    if name and list[name] then return name end
+    return SortedNames(list)[1]
+end
+
+local function SelectedProfile()
+    local name = SelectedName()
+    return name and ClassProfiles()[name], name
+end
+
+local function SelectProfile(name)
+    DB.selected[(ClassKey())] = name
+end
+
+-- Profile data from version 1.1 was one profile per class. Wrap it as
+-- "Default" so it keeps working.
+local function Migrate()
+    DB.profiles = DB.profiles or {}
+    DB.selected = DB.selected or {}
+    if (DB.schema or 1) < 2 then
+        for classFile, p in pairs(DB.profiles) do
+            if p.slots then
+                DB.profiles[classFile] = { Default = p }
+                DB.selected[classFile] = "Default"
+            end
+        end
+    end
+    DB.schema = SCHEMA
+
+    CHAR.filled = CHAR.filled or {}
+    CHAR.userSlots = CHAR.userSlots or {}
+    if CHAR.applied and not CHAR.profile then CHAR.profile = "Default" end
+    CHAR.schema = SCHEMA
 end
 
 -- Spellbook ---------------------------------------------------------------
@@ -111,21 +183,25 @@ end
 -- Macros ------------------------------------------------------------------
 
 local function BuildMacroIndex()
-    local byNameBody, byName = {}, {}
-    local last = MAX_ACCOUNT_MACROS + MAX_CHARACTER_MACROS
-    for i = 1, last do
+    local index = { byNameBody = {}, account = {}, character = {} }
+    for i = 1, MAX_ACCOUNT_MACROS + MAX_CHARACTER_MACROS do
         local name, _, body = GetMacroInfo(i)
         if name then
-            byNameBody[name .. "\n" .. (body or "")] = i
-            byName[name] = byName[name] or i
+            index.byNameBody[name .. "\n" .. (body or "")] = index.byNameBody[name .. "\n" .. (body or "")] or i
+            local scope = i > MAX_ACCOUNT_MACROS and index.character or index.account
+            scope[name] = scope[name] or i
         end
     end
-    return { byNameBody = byNameBody, byName = byName }
+    return index
 end
 
+-- Exact name and body first, then the same name in the same scope (account
+-- or character), then the same name anywhere. Creates the macro if missing.
 local function FindOrCreateMacro(entry, index, quiet)
-    local id = index.byNameBody[entry.name .. "\n" .. (entry.body or "")]
-        or index.byName[entry.name]
+    local key = entry.name .. "\n" .. (entry.body or "")
+    local sameScope = entry.perChar and index.character or index.account
+    local otherScope = entry.perChar and index.account or index.character
+    local id = index.byNameBody[key] or sameScope[entry.name] or otherScope[entry.name]
     if id then return id end
 
     local numAccount, numChar = GetNumMacros()
@@ -141,8 +217,9 @@ local function FindOrCreateMacro(entry, index, quiet)
 
     local ok, newId = pcall(CreateMacro, entry.name, entry.icon or "INV_Misc_QuestionMark", entry.body or "", perChar)
     if ok and newId then
-        index.byNameBody[entry.name .. "\n" .. (entry.body or "")] = newId
-        index.byName[entry.name] = newId
+        index.byNameBody[key] = newId
+        local scope = perChar and index.character or index.account
+        scope[entry.name] = newId
         return newId
     end
     return nil
@@ -188,8 +265,152 @@ local function ReadSlot(slot)
         return { t = "set", name = id }
     end
 
-    -- Anything else (pet actions, flyouts, companions) is left untouched on load.
+    -- Anything else (flyouts, companions) is left untouched on load.
     return { t = "keep" }
+end
+
+local function ReadAllSlots()
+    local slots, count = {}, 0
+    for slot = 1, MAX_SLOTS do
+        local entry = ReadSlot(slot)
+        if entry then
+            slots[slot] = entry
+            if entry.t ~= "keep" then count = count + 1 end
+        end
+    end
+    return slots, count
+end
+
+-- Keybindings -------------------------------------------------------------
+
+local function ReadBindings()
+    local out, count = {}, 0
+    for i = 1, GetNumBindings() do
+        local command = GetBinding(i)
+        if command then
+            local keys = { GetBindingKey(command) }
+            if #keys > 0 then
+                out[command] = keys
+                count = count + 1
+            end
+        end
+    end
+    return count > 0 and out or nil
+end
+
+-- Replaces every binding with the saved set. Skipped when nothing was saved,
+-- so a bad save can't wipe all keys.
+local function ApplyBindings(saved)
+    if not saved or not next(saved) then return false end
+    for i = 1, GetNumBindings() do
+        local command = GetBinding(i)
+        if command then
+            for _, key in ipairs({ GetBindingKey(command) }) do
+                SetBinding(key)
+            end
+        end
+    end
+    for command, keys in pairs(saved) do
+        for _, key in ipairs(keys) do
+            SetBinding(key, command)
+        end
+    end
+    SaveBindings(GetCurrentBindingSet())
+    return true
+end
+
+-- Which extra action bars are switched on --------------------------------
+
+local function ReadBars()
+    if not GetActionBarToggles then return nil end
+    local n = select("#", GetActionBarToggles())
+    if n == 0 then return nil end
+    local bars = { n = n }
+    for i = 1, n do
+        bars[i] = select(i, GetActionBarToggles()) and true or false
+    end
+    return bars
+end
+
+local function ApplyBars(bars)
+    if not bars or not SetActionBarToggles then return false end
+    local current = ReadBars()
+    local same = current and current.n == bars.n
+    if same then
+        for i = 1, bars.n do
+            if current[i] ~= bars[i] then same = false break end
+        end
+    end
+    if same then return false end
+    local ok = pcall(SetActionBarToggles, unpack(bars, 1, bars.n))
+    if ok and MultiActionBar_Update then pcall(MultiActionBar_Update) end
+    return ok
+end
+
+-- Pet bar -----------------------------------------------------------------
+
+local function PetFamily()
+    if not UnitExists("pet") then return nil end
+    return UnitCreatureFamily("pet") or UnitName("pet")
+end
+
+local function ReadPetBar()
+    local layout = {}
+    for slot = 1, NUM_PET_SLOTS do
+        local name, _, isToken, _, _, autoCastEnabled = GetPetActionInfo(slot)
+        if name then
+            layout[slot] = { name = name, token = isToken and true or nil, autocast = autoCastEnabled and true or nil }
+        end
+    end
+    return layout
+end
+
+local function PickupPetSpellByName(name)
+    if C_SpellBook and C_SpellBook.HasPetSpells and Enum and Enum.SpellBookSpellBank then
+        local bank = Enum.SpellBookSpellBank.Pet
+        for i = 1, (C_SpellBook.HasPetSpells() or 0) do
+            local item = C_SpellBook.GetSpellBookItemInfo(i, bank)
+            if item and item.name == name then
+                C_SpellBook.PickupSpellBookItem(i, bank)
+                return GetCursorInfo() ~= nil
+            end
+        end
+    elseif HasPetSpells then
+        for i = 1, (HasPetSpells() or 0) do
+            if GetSpellBookItemName(i, BOOKTYPE_PET) == name then
+                PickupSpellBookItem(i, BOOKTYPE_PET)
+                return GetCursorInfo() ~= nil
+            end
+        end
+    end
+    return false
+end
+
+-- Moves pet spells into their saved slots and matches autocast. Attack,
+-- Follow and the stance buttons are never moved: dropping one off the bar
+-- would delete it.
+local function ApplyPetBar(profile)
+    local family = PetFamily()
+    local layout = family and profile and profile.pets and profile.pets[family]
+    if not layout then return false end
+    for slot, entry in pairs(layout) do
+        if not entry.token then
+            local curName, _, curToken = GetPetActionInfo(slot)
+            if curName ~= entry.name and not curToken then
+                ClearCursor()
+                if PickupPetSpellByName(entry.name) then
+                    PickupPetAction(slot)
+                end
+                ClearCursor()
+            end
+            local name, _, _, _, allowed, enabled = GetPetActionInfo(slot)
+            if name == entry.name and allowed and (enabled and true or false) ~= (entry.autocast or false) then
+                pcall(TogglePetAutocast, slot)
+            end
+        end
+    end
+    petDoneThisSession[family] = true
+    return true
 end
 
 -- Placing actions ---------------------------------------------------------
@@ -243,79 +464,17 @@ local function NewContext(quiet)
     return { book = BuildSpellBook(), macros = BuildMacroIndex(), quiet = quiet }
 end
 
--- Save --------------------------------------------------------------------
-
-local function DoSave()
-    local classFile, className = ClassKey()
-    local slots, count = {}, 0
-    for slot = 1, MAX_SLOTS do
-        local entry = ReadSlot(slot)
-        if entry then
-            slots[slot] = entry
-            if entry.t ~= "keep" then count = count + 1 end
-        end
-    end
-    DB.profiles[classFile] = {
-        slots = slots,
-        savedFrom = CharName(),
-        savedAt = time(),
-        count = count,
-    }
-    CHAR.applied = true
-    CHAR.filled = {}
-    for slot in pairs(slots) do CHAR.filled[slot] = true end
-    Print(("Saved %d actions as the %s profile."):format(count, className))
-    if OneClickBars_UpdateStatus then OneClickBars_UpdateStatus() end
-end
-
-StaticPopupDialogs["ONECLICKBARS_OVERWRITE"] = {
-    text = "Replace the %s bar profile saved from %s with this character's bars?",
-    button1 = YES,
-    button2 = NO,
-    OnAccept = function() DoSave() end,
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    preferredIndex = 3,
-}
-
-function OneClickBars_Save()
-    if InCombatLockdown() then
-        Print("Can't change action bars in combat.")
-        return
-    end
-    local classFile, className = ClassKey()
-    local existing = DB.profiles[classFile]
-    if existing and existing.savedFrom ~= CharName() then
-        StaticPopup_Show("ONECLICKBARS_OVERWRITE", className, existing.savedFrom)
-    else
-        DoSave()
-    end
-end
-
--- Load --------------------------------------------------------------------
-
-local function DoLoad(quietIfMissing)
-    local classFile, className = ClassKey()
-    local profile = DB.profiles[classFile]
-    if not profile then
-        if not quietIfMissing then
-            Print("No " .. className .. " profile yet. Set up your bars on a " .. className .. " and press Save.")
-        end
-        return
-    end
-
-    local ctx = NewContext(false)
+-- Makes the bars match the saved slots exactly. Fills `filled` with the
+-- slots that were placed.
+local function ApplySlots(slots, ctx, filled)
     local placed, waiting = 0, 0
-    CHAR.filled = {}
-
     for slot = 1, MAX_SLOTS do
-        local entry = profile.slots[slot]
+        local entry = slots[slot]
         if entry then
             if entry.t ~= "keep" then
                 if Place(slot, entry, ctx) then
                     placed = placed + 1
-                    CHAR.filled[slot] = true
+                    if filled then filled[slot] = true end
                 else
                     waiting = waiting + 1
                 end
@@ -324,14 +483,206 @@ local function DoLoad(quietIfMissing)
             ClearSlot(slot)
         end
     end
+    return placed, waiting
+end
+
+-- Track slots the player changes by hand, so auto-fill leaves them alone.
+local function MarkUserSlot(slot)
+    if not applying and CHAR and CHAR.userSlots and type(slot) == "number" then
+        CHAR.userSlots[slot] = true
+    end
+end
+if PlaceAction then hooksecurefunc("PlaceAction", MarkUserSlot) end
+if PickupAction then hooksecurefunc("PickupAction", MarkUserSlot) end
+
+-- Save --------------------------------------------------------------------
+
+local function DoSave(name)
+    local classFile, className = ClassKey()
+    local slots, count = WithApplying(ReadAllSlots)
+    if not slots then return end
+
+    local list = ClassProfiles()
+    local old = list[name]
+    local pets = (old and old.pets) or {}
+    local family = PetFamily()
+    if family then pets[family] = ReadPetBar() end
+
+    list[name] = {
+        slots = slots,
+        count = count,
+        bindings = ReadBindings(),
+        bars = ReadBars(),
+        pets = pets,
+        savedFrom = CharName(),
+        savedAt = time(),
+    }
+    SelectProfile(name)
 
     CHAR.applied = true
-    local msg = ("Loaded %s bars from %s: %d placed."):format(className, profile.savedFrom or "?", placed)
-    if waiting > 0 then
-        msg = msg .. (" %d not known yet; they will be placed as you learn them."):format(waiting)
-    end
-    Print(msg)
+    CHAR.profile = name
+    CHAR.filled = {}
+    CHAR.userSlots = {}
+    for slot in pairs(slots) do CHAR.filled[slot] = true end
+
+    Print(("Saved %d actions as the %s profile \"%s\"."):format(count, className, name))
+    OneClickBars_UpdateStatus()
 end
+
+StaticPopupDialogs["ONECLICKBARS_OVERWRITE"] = {
+    text = "Replace the %s profile \"%s\" with this character's bars?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(_, data) DoSave(data) end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+local function CreateNamedProfile(name)
+    name = strtrim(name or "")
+    if name == "" then return end
+    if InCombatLockdown() then
+        Print("Can't read action bars in combat.")
+        return
+    end
+    if ClassProfiles()[name] then
+        local _, className = ClassKey()
+        StaticPopup_Show("ONECLICKBARS_OVERWRITE", className, name, name)
+    else
+        DoSave(name)
+    end
+end
+
+local function PopupEditBox(popup)
+    return popup.editBox or popup.EditBox or (popup.GetEditBox and popup:GetEditBox())
+end
+
+StaticPopupDialogs["ONECLICKBARS_NEWPROFILE"] = {
+    text = "Name for the new %s profile:",
+    button1 = ACCEPT,
+    button2 = CANCEL,
+    hasEditBox = true,
+    maxLetters = 32,
+    OnAccept = function(self)
+        local box = PopupEditBox(self)
+        CreateNamedProfile(box and box:GetText())
+    end,
+    EditBoxOnEnterPressed = function(self)
+        CreateNamedProfile(self:GetText())
+        self:GetParent():Hide()
+    end,
+    EditBoxOnEscapePressed = function(self) self:GetParent():Hide() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+function OneClickBars_Save()
+    if InCombatLockdown() then
+        Print("Can't read action bars in combat.")
+        return
+    end
+    local profile, name = SelectedProfile()
+    if not profile then
+        DoSave("Default")
+    elseif profile.savedFrom ~= CharName() then
+        local _, className = ClassKey()
+        StaticPopup_Show("ONECLICKBARS_OVERWRITE", className, name, name)
+    else
+        DoSave(name)
+    end
+end
+
+function OneClickBars_NewProfile()
+    local _, className = ClassKey()
+    StaticPopup_Show("ONECLICKBARS_NEWPROFILE", className)
+end
+
+StaticPopupDialogs["ONECLICKBARS_DELETE"] = {
+    text = "Delete the %s profile \"%s\"?",
+    button1 = YES,
+    button2 = NO,
+    OnAccept = function(_, data)
+        ClassProfiles()[data] = nil
+        Print("Deleted profile \"" .. data .. "\".")
+        OneClickBars_UpdateStatus()
+    end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+local function DeleteSelected()
+    local profile, name = SelectedProfile()
+    if not profile then
+        Print("No profile to delete.")
+        return
+    end
+    local _, className = ClassKey()
+    StaticPopup_Show("ONECLICKBARS_DELETE", className, name, name)
+end
+
+-- Load and undo -----------------------------------------------------------
+
+local function TakeSnapshot()
+    local slots = ReadAllSlots()
+    return {
+        slots = slots,
+        bindings = ReadBindings(),
+        bars = ReadBars(),
+        char = {
+            applied = CHAR.applied,
+            profile = CHAR.profile,
+            filled = CHAR.filled,
+            userSlots = CHAR.userSlots,
+        },
+        at = time(),
+    }
+end
+
+local function DoLoad(quietIfMissing)
+    local _, className = ClassKey()
+    local profile, name = SelectedProfile()
+    if not profile then
+        if not quietIfMissing then
+            Print("No " .. className .. " profile yet. Set up your bars on a " .. className .. " and press Save.")
+        end
+        return
+    end
+
+    local result = WithApplying(function()
+        CHAR.undo = TakeSnapshot()
+        local filled = {}
+        local placed, waiting = ApplySlots(profile.slots, NewContext(false), filled)
+        local keys = DB.copyBindings ~= false and ApplyBindings(profile.bindings)
+        local bars = ApplyBars(profile.bars)
+        local pet = ApplyPetBar(profile)
+        CHAR.applied = true
+        CHAR.profile = name
+        CHAR.filled = filled
+        CHAR.userSlots = {}
+        return { placed = placed, waiting = waiting, keys = keys, bars = bars, pet = pet }
+    end)
+    if not result then return end
+
+    local msg = ("Loaded \"%s\" from %s: %d placed."):format(name, profile.savedFrom or "?", result.placed)
+    if result.waiting > 0 then
+        msg = msg .. (" %d not known yet; they will be placed as you learn them."):format(result.waiting)
+    end
+    if result.keys then msg = msg .. " Keybindings copied." end
+    if result.pet then msg = msg .. " Pet bar set." end
+    Print(msg)
+    if result.bars then
+        Print("Switched on the same action bars as the saved character. Type /reload if one doesn't appear.")
+    end
+    OneClickBars_UpdateStatus()
+end
+
+local ResetGuideLater -- set in the RestedXP section
 
 function OneClickBars_Load()
     if InCombatLockdown() then
@@ -345,9 +696,37 @@ function OneClickBars_Load()
     end
 end
 
+function OneClickBars_Undo()
+    local snap = CHAR.undo
+    if not snap then
+        Print("Nothing to undo.")
+        return
+    end
+    if InCombatLockdown() then
+        Print("Can't change action bars in combat.")
+        return
+    end
+    local done = WithApplying(function()
+        ApplySlots(snap.slots, NewContext(true))
+        ApplyBindings(snap.bindings)
+        ApplyBars(snap.bars)
+        local c = snap.char or {}
+        CHAR.applied = c.applied
+        CHAR.profile = c.profile
+        CHAR.filled = c.filled or {}
+        CHAR.userSlots = c.userSlots or {}
+        return true
+    end)
+    if done then
+        CHAR.undo = nil
+        Print("Restored your bars and keybindings from before the last load.")
+    end
+    OneClickBars_UpdateStatus()
+end
+
 -- Auto-fill: place newly learned spells (and newly looted items) in their
--- saved slots. Slots already filled are left alone, except to upgrade a
--- spell to a higher rank of the same spell.
+-- saved slots. Filled slots and slots you changed by hand are left alone,
+-- except to upgrade a spell to a higher rank of the same spell.
 local function AutoFill()
     autoFillQueued = false
     if not (CHAR and CHAR.applied) or DB.autoFill == false then return end
@@ -356,50 +735,48 @@ local function AutoFill()
         return
     end
 
-    local profile = DB.profiles[(ClassKey())]
+    local profile = CHAR.profile and ClassProfiles()[CHAR.profile]
     if not profile then return end
 
-    local ctx = NewContext(true)
-    local placed = 0
-    local placedNames = {}
+    local placed = WithApplying(function()
+        local ctx = NewContext(true)
+        local count = 0
+        local placedNames = {}
 
-    for slot = 1, MAX_SLOTS do
-        local entry = profile.slots[slot]
-        if entry and entry.t ~= "keep" then
-            local kind, curId = GetActionInfo(slot)
-            local doPlace = false
-            if not CHAR.filled[slot] then
-                doPlace = true
-            elseif entry.t == "spell" and kind == "spell" and GetSpellName(curId) == entry.name then
-                local target = ResolveSpell(entry, ctx.book)
-                doPlace = target and target ~= curId
-            end
-            if doPlace then
-                if entry.t == "spell" and kind == "spell" and curId == ResolveSpell(entry, ctx.book) then
-                    CHAR.filled[slot] = true
-                elseif Place(slot, entry, ctx) then
-                    CHAR.filled[slot] = true
-                    placed = placed + 1
-                    if entry.t == "spell" then placedNames[entry.name] = true end
-                end
-            end
-        end
-    end
-
-    -- The game may drop a newly learned spell on a free slot by itself.
-    -- Remove that copy if the profile has the slot empty.
-    if next(placedNames) then
         for slot = 1, MAX_SLOTS do
-            if not profile.slots[slot] then
+            local entry = profile.slots[slot]
+            if entry and entry.t ~= "keep" and not CHAR.userSlots[slot] then
                 local kind, curId = GetActionInfo(slot)
-                if kind == "spell" and placedNames[GetSpellName(curId) or ""] then
-                    ClearSlot(slot)
+                local target = entry.t == "spell" and ResolveSpell(entry, ctx.book)
+                if kind == "spell" and target and curId == target then
+                    CHAR.filled[slot] = true
+                elseif not CHAR.filled[slot]
+                    or (target and kind == "spell" and GetSpellName(curId) == entry.name) then
+                    if Place(slot, entry, ctx) then
+                        CHAR.filled[slot] = true
+                        count = count + 1
+                        if entry.t == "spell" then placedNames[entry.name] = true end
+                    end
                 end
             end
         end
-    end
 
-    if placed > 0 then
+        -- The game may drop a newly learned spell on a free slot by itself.
+        -- Remove that copy if the profile has the slot empty.
+        if next(placedNames) then
+            for slot = 1, MAX_SLOTS do
+                if not profile.slots[slot] and not CHAR.userSlots[slot] then
+                    local kind, curId = GetActionInfo(slot)
+                    if kind == "spell" and placedNames[GetSpellName(curId) or ""] then
+                        ClearSlot(slot)
+                    end
+                end
+            end
+        end
+        return count
+    end)
+
+    if placed and placed > 0 then
         Print(("Placed %d new action%s from your profile."):format(placed, placed == 1 and "" or "s"))
     end
 end
@@ -408,6 +785,45 @@ local function QueueAutoFill()
     if autoFillQueued then return end
     autoFillQueued = true
     C_Timer.After(1, AutoFill)
+end
+
+-- When a pet is summoned, set up its bar once per session.
+local function QueuePetBar()
+    if petQueued or not (CHAR and CHAR.applied) then return end
+    petQueued = true
+    C_Timer.After(1.5, function()
+        petQueued = false
+        local family = PetFamily()
+        if not family or petDoneThisSession[family] or InCombatLockdown() then return end
+        local profile = CHAR.profile and ClassProfiles()[CHAR.profile]
+        if WithApplying(ApplyPetBar, profile) then
+            Print("Pet bar set for " .. family .. ".")
+        end
+    end)
+end
+
+-- Opening cinematic -------------------------------------------------------
+
+local function SkipCinematic()
+    if DB.skipIntro == false or UnitLevel("player") > 1 then return end
+    C_Timer.After(0.1, function()
+        if CinematicFrame_CancelCinematic then
+            pcall(CinematicFrame_CancelCinematic)
+        elseif CanCancelScene and CanCancelScene() then
+            pcall(CancelScene)
+        elseif StopCinematic then
+            pcall(StopCinematic)
+        end
+    end)
+end
+
+local function SkipMovie()
+    if DB.skipIntro == false or UnitLevel("player") > 1 then return end
+    C_Timer.After(0.1, function()
+        if MovieFrame and MovieFrame.StopMovie then
+            pcall(MovieFrame.StopMovie, MovieFrame)
+        end
+    end)
 end
 
 -- RestedXP ----------------------------------------------------------------
@@ -488,21 +904,48 @@ end
 
 local frame
 
+local function CycleProfile(step)
+    local names = SortedNames(ClassProfiles())
+    if #names == 0 then return end
+    local current = SelectedName()
+    local index = 1
+    for i, name in ipairs(names) do
+        if name == current then index = i end
+    end
+    index = ((index - 1 + step) % #names) + 1
+    SelectProfile(names[index])
+    OneClickBars_UpdateStatus()
+end
+
 function OneClickBars_UpdateStatus()
-    if not frame then return end
-    local classFile, className = ClassKey()
-    local profile = DB.profiles[classFile]
+    if not frame or not DB then return end
+    local _, className = ClassKey()
+    local profile, name = SelectedProfile()
     if profile then
-        frame.status:SetText(("%s profile: %d actions\nfrom %s"):format(className, profile.count or 0, profile.savedFrom or "?"))
+        frame.profileName:SetText(name)
+        frame.status:SetText(("%s: %d actions\nfrom %s"):format(className, profile.count or 0, profile.savedFrom or "?"))
     else
+        frame.profileName:SetText("No profile")
         frame.status:SetText("No " .. className .. " profile saved yet")
     end
+    local multiple = #SortedNames(ClassProfiles()) > 1
+    frame.prev:SetEnabled(multiple)
+    frame.next:SetEnabled(multiple)
+    frame.undo:SetEnabled(CHAR and CHAR.undo ~= nil)
+end
+
+local function Button(parent, text, width, height, onClick)
+    local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
+    b:SetSize(width, height)
+    b:SetText(text)
+    b:SetScript("OnClick", onClick)
+    return b
 end
 
 local function CreateWindow()
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
     frame = CreateFrame("Frame", "OneClickBarsFrame", UIParent, template)
-    frame:SetSize(240, 182)
+    frame:SetSize(240, 258)
     frame:SetFrameStrata("MEDIUM")
     frame:SetClampedToScreen(true)
     frame:SetMovable(true)
@@ -540,25 +983,30 @@ local function CreateWindow()
     close:SetPoint("TOPRIGHT", 0, 0)
     close:SetScript("OnClick", function() OneClickBars_Toggle() end)
 
-    local load = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    load:SetSize(200, 34)
-    load:SetPoint("TOP", 0, -36)
-    load:SetText("Load bars")
+    -- Profile picker: < name >
+    frame.prev = Button(frame, "<", 28, 24, function() CycleProfile(-1) end)
+    frame.prev:SetPoint("TOPLEFT", 20, -34)
+    frame.next = Button(frame, ">", 28, 24, function() CycleProfile(1) end)
+    frame.next:SetPoint("TOPRIGHT", -20, -34)
+    frame.profileName = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
+    frame.profileName:SetPoint("LEFT", frame.prev, "RIGHT", 4, 0)
+    frame.profileName:SetPoint("RIGHT", frame.next, "LEFT", -4, 0)
+
+    local load = Button(frame, "Load bars", 200, 34, OneClickBars_Load)
+    load:SetPoint("TOP", 0, -64)
     load:SetNormalFontObject("GameFontNormalLarge")
     load:SetHighlightFontObject("GameFontHighlightLarge")
-    load:SetScript("OnClick", OneClickBars_Load)
 
-    local save = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    save:SetSize(200, 26)
-    save:SetPoint("TOP", load, "BOTTOM", 0, -6)
-    save:SetText("Save these bars")
-    save:SetScript("OnClick", OneClickBars_Save)
+    local save = Button(frame, "Save bars", 98, 26, OneClickBars_Save)
+    save:SetPoint("TOPLEFT", load, "BOTTOMLEFT", 0, -6)
+    local new = Button(frame, "New profile", 98, 26, OneClickBars_NewProfile)
+    new:SetPoint("TOPRIGHT", load, "BOTTOMRIGHT", 0, -6)
 
-    local guide = CreateFrame("Button", nil, frame, "UIPanelButtonTemplate")
-    guide:SetSize(200, 26)
-    guide:SetPoint("TOP", save, "BOTTOM", 0, -6)
-    guide:SetText("Reset RestedXP guide")
-    guide:SetScript("OnClick", OneClickBars_ResetGuide)
+    frame.undo = Button(frame, "Undo last load", 200, 26, OneClickBars_Undo)
+    frame.undo:SetPoint("TOP", load, "BOTTOM", 0, -38)
+
+    local guide = Button(frame, "Reset RestedXP guide", 200, 26, OneClickBars_ResetGuide)
+    guide:SetPoint("TOP", frame.undo, "BOTTOM", 0, -6)
 
     frame.status = frame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
     frame.status:SetPoint("TOP", guide, "BOTTOM", 0, -8)
@@ -637,38 +1085,70 @@ end
 
 _G.BINDING_HEADER_ONECLICKBARS = "OneClickBars"
 _G.BINDING_NAME_ONECLICKBARS_LOAD = "Load action bars"
+_G.BINDING_NAME_ONECLICKBARS_UNDO = "Undo last load"
 _G.BINDING_NAME_ONECLICKBARS_RESETGUIDE = "Reset RestedXP guide"
 _G.BINDING_NAME_ONECLICKBARS_TOGGLE = "Show or hide the window"
 
 -- Slash command -----------------------------------------------------------
 
+local function OnOff(arg)
+    return arg ~= "off"
+end
+
 SLASH_ONECLICKBARS1 = "/1cb"
 SLASH_ONECLICKBARS2 = "/ocb"
 SlashCmdList.ONECLICKBARS = function(input)
-    local cmd, arg = strsplit(" ", strlower(strtrim(input or "")), 2)
+    local cmd, arg = strsplit(" ", strtrim(input or ""), 2)
+    cmd = strlower(cmd or "")
+    local argLower = arg and strlower(strtrim(arg))
     if cmd == "" then
         OneClickBars_Toggle()
     elseif cmd == "load" then
         OneClickBars_Load()
     elseif cmd == "save" then
         OneClickBars_Save()
-    elseif cmd == "scale" and tonumber(arg or "") then
-        DB.scale = math.max(0.5, math.min(3, tonumber(arg)))
+    elseif cmd == "undo" then
+        OneClickBars_Undo()
+    elseif cmd == "new" and argLower ~= "on" and argLower ~= "off" then
+        if arg and strtrim(arg) ~= "" then
+            CreateNamedProfile(arg)
+        else
+            OneClickBars_NewProfile()
+        end
+    elseif cmd == "new" then
+        DB.autoNew = OnOff(argLower)
+        Print("Auto-load on new level 1 characters: " .. argLower)
+    elseif cmd == "use" and arg then
+        local name = strtrim(arg)
+        if ClassProfiles()[name] then
+            SelectProfile(name)
+            Print("Selected profile \"" .. name .. "\".")
+            OneClickBars_UpdateStatus()
+        else
+            Print("No profile named \"" .. name .. "\".")
+        end
+    elseif cmd == "scale" and tonumber(argLower or "") then
+        DB.scale = math.max(0.5, math.min(3, tonumber(argLower)))
         frame:SetScale(DB.scale)
     elseif cmd == "auto" then
-        DB.autoFill = arg ~= "off"
+        DB.autoFill = OnOff(argLower)
         Print("Placing spells as you learn them: " .. (DB.autoFill and "on" or "off"))
-    elseif cmd == "new" then
-        DB.autoNew = arg ~= "off"
-        Print("Auto-load on new level 1 characters: " .. (DB.autoNew and "on" or "off"))
+    elseif cmd == "keys" then
+        DB.copyBindings = OnOff(argLower)
+        Print("Copy keybindings on load: " .. (DB.copyBindings and "on" or "off"))
+    elseif cmd == "intro" then
+        DB.skipIntro = OnOff(argLower)
+        Print("Skip the opening cinematic: " .. (DB.skipIntro and "on" or "off"))
     elseif cmd == "list" then
         local any = false
-        for classFile, p in pairs(DB.profiles) do
-            any = true
-            Print(("%s: %d actions from %s"):format(classFile, p.count or 0, p.savedFrom or "?"))
+        for classFile, list in pairs(DB.profiles) do
+            for name, p in pairs(list) do
+                any = true
+                Print(("%s \"%s\": %d actions from %s"):format(classFile, name, p.count or 0, p.savedFrom or "?"))
+            end
         end
         if not any then Print("No profiles saved yet.") end
-    elseif cmd == "guide" and arg == "here" then
+    elseif cmd == "guide" and argLower == "here" then
         if not (RXPCData and RXPCData.currentGuideName) then
             Print("Load a guide in RestedXP first.")
             return
@@ -677,18 +1157,16 @@ SlashCmdList.ONECLICKBARS = function(input)
         DB.rxpTarget = DB.rxpTarget or {}
         DB.rxpTarget[faction] = { group = RXPCData.currentGuideGroup, name = RXPCData.currentGuideName }
         Print(faction .. " starting guide set to " .. RXPCData.currentGuideName .. ".")
-    elseif cmd == "guide" and (arg == "on" or arg == "off") then
-        DB.resetGuide = arg == "on"
-        Print("Reset RestedXP guide on level 1 characters: " .. arg)
+    elseif cmd == "guide" and (argLower == "on" or argLower == "off") then
+        DB.resetGuide = argLower == "on"
+        Print("Reset RestedXP guide on level 1 characters: " .. argLower)
     elseif cmd == "guide" then
         OneClickBars_ResetGuide()
     elseif cmd == "delete" then
-        local classFile, className = ClassKey()
-        DB.profiles[classFile] = nil
-        Print("Deleted the " .. className .. " profile.")
-        OneClickBars_UpdateStatus()
+        DeleteSelected()
     else
-        Print("/1cb (show/hide), /1cb load, /1cb save, /1cb list, /1cb delete, /1cb scale 1.5, /1cb auto on|off, /1cb new on|off, /1cb guide, /1cb guide here, /1cb guide on|off")
+        Print("/1cb (show/hide), load, save, undo, new [name], use <name>, list, delete, scale 1.5, "
+            .. "auto on|off, keys on|off, intro on|off, new on|off, guide, guide here, guide on|off")
     end
 end
 
@@ -700,21 +1178,31 @@ events:RegisterEvent("PLAYER_ENTERING_WORLD")
 events:RegisterEvent("PLAYER_REGEN_ENABLED")
 events:RegisterEvent("SPELLS_CHANGED")
 events:RegisterEvent("BAG_UPDATE_DELAYED")
+events:RegisterEvent("UNIT_PET")
+events:RegisterEvent("CINEMATIC_START")
+pcall(events.RegisterEvent, events, "PLAY_MOVIE")
 pcall(events.RegisterEvent, events, "LEARNED_SPELL_IN_TAB")
 pcall(events.RegisterEvent, events, "LEARNED_SPELL_IN_SKILL_LINE")
 
-events:SetScript("OnEvent", function(_, event, arg1, arg2)
+events:SetScript("OnEvent", function(_, event, arg1)
     if event == "ADDON_LOADED" then
         if arg1 ~= ADDON then return end
         OneClickBarsDB = OneClickBarsDB or {}
         DB = OneClickBarsDB
-        DB.profiles = DB.profiles or {}
         if OneClickBarsChar == nil then isNewCharacter = true end
         OneClickBarsChar = OneClickBarsChar or {}
         CHAR = OneClickBarsChar
-        CHAR.filled = CHAR.filled or {}
+        Migrate()
         CreateWindow()
         CreateMinimapButton()
+        return
+    end
+    if not DB then return end
+
+    if event == "CINEMATIC_START" then
+        SkipCinematic()
+    elseif event == "PLAY_MOVIE" then
+        SkipMovie()
     elseif event == "PLAYER_ENTERING_WORLD" then
         OneClickBars_UpdateStatus()
         local isInitialLogin = arg1
@@ -733,6 +1221,7 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
             end
         elseif CHAR.applied then
             QueueAutoFill()
+            QueuePetBar()
         end
     elseif event == "PLAYER_REGEN_ENABLED" then
         local pending = pendingAfterCombat
@@ -742,7 +1231,9 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         elseif pending == "fill" then
             QueueAutoFill()
         end
-    elseif DB and CHAR and CHAR.applied then
+    elseif event == "UNIT_PET" then
+        if arg1 == "player" then QueuePetBar() end
+    elseif CHAR.applied then
         QueueAutoFill()
     end
 end)
