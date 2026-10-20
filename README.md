@@ -37,4 +37,4 @@ Key bindings for "Load action bars", "Undo last load" and "Reset RestedXP guide"
 
 ## Releases
 
-Pushing a tag like `v1.2.0` builds the addon zip and attaches it to a GitHub release. To also upload to CurseForge, add a `## X-Curse-Project-ID:` line to `OneClickBars.toc` and a `CF_API_KEY` repository secret.
+Pushing a tag like `v1.2.0` builds the addon zip and attaches it to a GitHub release. Uploading to CurseForge also needs a `CF_API_TOKEN` repository secret.
