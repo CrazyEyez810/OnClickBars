@@ -1,0 +1,11 @@
+<Bindings>
+	<Binding name="ONECLICKBARS_LOAD" header="ONECLICKBARS" category="ADDONS">
+		OneClickBars_Load()
+	</Binding>
+	<Binding name="ONECLICKBARS_RESETGUIDE" category="ADDONS">
+		OneClickBars_ResetGuide()
+	</Binding>
+	<Binding name="ONECLICKBARS_TOGGLE" category="ADDONS">
+		OneClickBars_Toggle()
+	</Binding>
+</Bindings>
