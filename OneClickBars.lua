@@ -496,6 +496,358 @@ end
 if PlaceAction then hooksecurefunc("PlaceAction", MarkUserSlot) end
 if PickupAction then hooksecurefunc("PickupAction", MarkUserSlot) end
 
+-- Whole setup --------------------------------------------------------------
+
+-- Everything that isn't tied to a class: changed game settings, all macros,
+-- the Edit Mode layout, RestedXP settings and per-character addon layouts.
+-- "Save setup" stores it; "Load setup" and a new character's first login put
+-- it back.
+
+-- Settings that belong to the machine, the login or the realm, not the UI.
+local CVAR_SKIP = {
+    "^gx", "^hw", "^last", "[Rr]ealm", "[Aa]ccount", "^portal", "^agent", "^launcher",
+    "^read[A-Z]", "Locale$", "^Sound_.*Device", "^Sound_OutputDriver", "^videoOptionsVersion",
+    "^processAffinity", "^cameraSaved", "^webChallenge",
+}
+
+-- Per-character saved variables of addons whose layout should carry over
+-- (WeaponSwingTimer). Quest progress addons are left out on purpose.
+local CHAR_ADDON_VARS = {
+    "character_core_settings", "character_player_settings", "character_target_settings",
+    "character_hunter_settings", "character_castbar_settings",
+}
+
+local function DeepCopy(v)
+    if type(v) ~= "table" then return v end
+    local t = {}
+    for k, x in pairs(v) do t[DeepCopy(k)] = DeepCopy(x) end
+    return t
+end
+
+local function IsSecret(v)
+    return _G.issecretvalue and _G.issecretvalue(v) or false
+end
+
+local reloadQueued = false
+
+StaticPopupDialogs["ONECLICKBARS_RELOAD"] = {
+    text = "Reload the interface to finish setting up this character?\n\nPress Enter to reload.",
+    button1 = RELOADUI or "Reload",
+    button2 = LATER or "Later",
+    OnAccept = function() ReloadUI() end,
+    enterClicksFirstButton = true,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+-- Asks once, a few seconds after the last change that needs a reload.
+local function RequestReload()
+    if reloadQueued then return end
+    reloadQueued = true
+    C_Timer.After(3, function()
+        reloadQueued = false
+        StaticPopup_Show("ONECLICKBARS_RELOAD")
+    end)
+end
+
+-- Game settings --
+
+local GetAllCommands = (C_Console and C_Console.GetAllCommands) or _G.ConsoleGetAllCommands
+
+local function SkipCVar(name)
+    for _, pattern in ipairs(CVAR_SKIP) do
+        if name:find(pattern) then return true end
+    end
+    return false
+end
+
+local function ReadChangedCVars()
+    if not (GetAllCommands and C_CVar and C_CVar.GetCVarInfo) then return nil, 0 end
+    local cvarType = Enum and Enum.ConsoleCommandType and Enum.ConsoleCommandType.Cvar
+    local out, count = {}, 0
+    for _, info in ipairs(GetAllCommands() or {}) do
+        local name = info.command
+        if type(name) == "string" and (cvarType == nil or info.commandType == cvarType) and not SkipCVar(name) then
+            local ok, value, default, _, _, locked, _, readOnly = pcall(C_CVar.GetCVarInfo, name)
+            if ok and value ~= nil and not IsSecret(value) and value ~= default and not locked and not readOnly then
+                out[name] = value
+                count = count + 1
+            end
+        end
+    end
+    return out, count
+end
+
+local function ApplyCVars(saved, undo)
+    local changed, waiting = 0, 0
+    if not (C_CVar and C_CVar.GetCVarInfo) then return 0, 0 end
+    for name, value in pairs(saved or {}) do
+        local ok, current, _, _, _, locked, secure, readOnly = pcall(C_CVar.GetCVarInfo, name)
+        if ok and current ~= nil and not IsSecret(current) and current ~= value and not locked and not readOnly then
+            if secure and InCombatLockdown() then
+                waiting = waiting + 1
+            else
+                pcall(C_CVar.SetCVar, name, value)
+                if C_CVar.GetCVar(name) == value then
+                    if undo and undo[name] == nil then undo[name] = current end
+                    changed = changed + 1
+                end
+            end
+        end
+    end
+    return changed, waiting
+end
+
+-- Macros --
+
+local function ReadAllMacros()
+    local list = {}
+    for i = 1, MAX_ACCOUNT_MACROS + MAX_CHARACTER_MACROS do
+        local name, icon, body = GetMacroInfo(i)
+        if name then
+            list[#list + 1] = { name = name, icon = icon, body = body, perChar = i > MAX_ACCOUNT_MACROS }
+        end
+    end
+    return list
+end
+
+local function CreateMissingMacros(list)
+    local before = select(1, GetNumMacros()) + select(2, GetNumMacros())
+    local index = BuildMacroIndex()
+    for _, entry in ipairs(list or {}) do
+        FindOrCreateMacro(entry, index, false)
+    end
+    return (select(1, GetNumMacros()) + select(2, GetNumMacros())) - before
+end
+
+-- Edit Mode --
+
+local function EditModeReady()
+    return C_EditMode and C_EditMode.GetLayouts and EditModePresetLayoutManager
+        and Enum and Enum.EditModeLayoutType and true or false
+end
+
+-- Presets first, then saved layouts: the list activeLayout indexes into.
+local function CombinedLayouts()
+    local saved = C_EditMode.GetLayouts()
+    if not saved or not saved.layouts or not saved.activeLayout or saved.activeLayout < 1 then return nil end
+    local layouts = DeepCopy(EditModePresetLayoutManager:GetCopyOfPresetLayouts())
+    local numPresets = #layouts
+    for _, layout in ipairs(saved.layouts) do layouts[#layouts + 1] = DeepCopy(layout) end
+    return saved, layouts, numPresets
+end
+
+local function ReadEditMode()
+    if not EditModeReady() then return nil end
+    local saved, layouts = CombinedLayouts()
+    if not saved then return nil end
+    local active = layouts[saved.activeLayout]
+    if not active then return nil end
+    local out = {}
+    if C_EditMode.GetAccountSettings then out.account = DeepCopy(C_EditMode.GetAccountSettings()) end
+    if active.layoutType == Enum.EditModeLayoutType.Preset then
+        out.presetName = active.layoutName
+    else
+        out.layout = DeepCopy(active)
+    end
+    return out
+end
+
+local function LayoutString(layout)
+    local ok, str = pcall(C_EditMode.ConvertLayoutInfoToString, layout)
+    return ok and str or nil
+end
+
+-- Returns "changed", "same" or "notready".
+local function ApplyEditMode(em, undo)
+    if not em or not EditModeReady() then return "same" end
+    local saved, layouts, numPresets = CombinedLayouts()
+    if not saved then return "notready" end
+    local changed = false
+
+    local function Backup()
+        if undo and not undo.editMode then
+            undo.editMode = { activeLayout = saved.activeLayout, layouts = DeepCopy(C_EditMode.GetLayouts().layouts) }
+        end
+    end
+
+    if em.presetName then
+        local index
+        for i = 1, numPresets do
+            if layouts[i].layoutName == em.presetName then index = i end
+        end
+        if index and index ~= saved.activeLayout then
+            Backup()
+            C_EditMode.SetActiveLayout(index)
+            changed = true
+        end
+    elseif em.layout then
+        -- Saved as an account layout so every character on the account gets it.
+        local layout = DeepCopy(em.layout)
+        layout.layoutType = Enum.EditModeLayoutType.Account
+        local index
+        for i = numPresets + 1, #layouts do
+            if layouts[i].layoutName == layout.layoutName then index = i end
+        end
+        local wanted = LayoutString(layout)
+        local same = index and index == saved.activeLayout and wanted ~= nil and LayoutString(layouts[index]) == wanted
+        if not same then
+            Backup()
+            if index then layouts[index] = layout else layouts[#layouts + 1] = layout; index = #layouts end
+            saved.layouts = layouts
+            saved.activeLayout = index
+            C_EditMode.SaveLayouts(saved)
+            C_EditMode.SetActiveLayout(index)
+            changed = true
+        end
+    end
+
+    if em.account and C_EditMode.SetAccountSetting and C_EditMode.GetAccountSettings then
+        local current = {}
+        for _, setting in ipairs(C_EditMode.GetAccountSettings() or {}) do current[setting.setting] = setting.value end
+        for _, setting in ipairs(em.account) do
+            if current[setting.setting] ~= nil and current[setting.setting] ~= setting.value then
+                if undo then
+                    undo.editModeAccount = undo.editModeAccount or {}
+                    if undo.editModeAccount[setting.setting] == nil then
+                        undo.editModeAccount[setting.setting] = current[setting.setting]
+                    end
+                end
+                pcall(C_EditMode.SetAccountSetting, setting.setting, setting.value)
+                changed = true
+            end
+        end
+    end
+    return changed and "changed" or "same"
+end
+
+local function UndoEditMode(undo)
+    if not EditModeReady() then return end
+    if undo.editMode then
+        local layouts = DeepCopy(EditModePresetLayoutManager:GetCopyOfPresetLayouts())
+        for _, layout in ipairs(undo.editMode.layouts or {}) do layouts[#layouts + 1] = DeepCopy(layout) end
+        pcall(C_EditMode.SaveLayouts, { layouts = layouts, activeLayout = undo.editMode.activeLayout })
+        pcall(C_EditMode.SetActiveLayout, undo.editMode.activeLayout)
+    end
+    for setting, value in pairs(undo.editModeAccount or {}) do
+        pcall(C_EditMode.SetAccountSetting, setting, value)
+    end
+end
+
+-- RestedXP and per-character addon layouts --
+
+local function RXPSettings()
+    local ace = LibStub and LibStub("AceAddon-3.0", true)
+    local rxp = ace and ace:GetAddon("RXPGuides", true)
+    return rxp and rxp.settings and rxp.settings.profile
+end
+
+local function ApplyRXPSettings(saved, undo)
+    local profile = RXPSettings()
+    if not profile or not saved then return 0 end
+    local changed = 0
+    for key, value in pairs(saved) do
+        if type(value) == "table" or profile[key] ~= value then
+            if undo and undo[key] == nil then undo[key] = { value = DeepCopy(profile[key]) } end
+            profile[key] = DeepCopy(value)
+            changed = changed + 1
+        end
+    end
+    return changed
+end
+
+local function ReadCharAddons()
+    local out = {}
+    for _, name in ipairs(CHAR_ADDON_VARS) do
+        if type(_G[name]) == "table" then out[name] = DeepCopy(_G[name]) end
+    end
+    return out
+end
+
+-- Writes into the existing tables, so the addon saves our values at logout.
+local function ApplyCharAddons(saved, undo)
+    local changed = 0
+    for name, value in pairs(saved or {}) do
+        local current = _G[name]
+        if type(current) == "table" then
+            if undo and undo[name] == nil then undo[name] = DeepCopy(current) end
+            wipe(current)
+            for k, v in pairs(DeepCopy(value)) do current[k] = v end
+            changed = changed + 1
+        elseif current == nil then
+            _G[name] = DeepCopy(value)
+            changed = changed + 1
+        end
+    end
+    return changed
+end
+
+-- Save and apply --
+
+local function SaveUI()
+    local cvars, cvarCount = ReadChangedCVars()
+    local macros = ReadAllMacros()
+    local rxp = RXPSettings()
+    DB.ui = {
+        savedFrom = CharName(),
+        savedAt = time(),
+        cvars = cvars,
+        macros = macros,
+        editMode = ReadEditMode(),
+        rxp = rxp and DeepCopy(rxp) or nil,
+        charAddons = ReadCharAddons(),
+    }
+    return { cvars = cvarCount, macros = #macros, editMode = DB.ui.editMode ~= nil, rxp = rxp ~= nil }
+end
+
+local function ApplyEditModeWithRetry(em, undo, attempt)
+    local ok, result = pcall(ApplyEditMode, em, undo)
+    if not ok then
+        Print("Couldn't set the Edit Mode layout: " .. tostring(result))
+    elseif result == "notready" then
+        if attempt < 10 then
+            C_Timer.After(2, function() ApplyEditModeWithRetry(em, undo, attempt + 1) end)
+        else
+            Print("Edit Mode wasn't ready, so the layout wasn't set. Click Load setup again.")
+        end
+    elseif result == "changed" then
+        Print("Edit Mode layout set.")
+        RequestReload()
+    end
+end
+
+local function ApplyUI(ui)
+    if not ui then return nil end
+    CHAR.uiUndo = CHAR.uiUndo or { cvars = {}, rxp = {}, charAddons = {} }
+    local undo = CHAR.uiUndo
+    local cvars, cvarsWaiting = ApplyCVars(ui.cvars, undo.cvars)
+    local macros = CreateMissingMacros(ui.macros)
+    local rxp = ApplyRXPSettings(ui.rxp, undo.rxp)
+    local addons = ApplyCharAddons(ui.charAddons, undo.charAddons)
+    ApplyEditModeWithRetry(ui.editMode, undo, 1)
+    if rxp > 0 or addons > 0 then RequestReload() end
+    return { cvars = cvars, cvarsWaiting = cvarsWaiting, macros = macros, rxp = rxp, addons = addons }
+end
+
+local function UndoUI(undo)
+    for name, value in pairs(undo.cvars or {}) do pcall(C_CVar.SetCVar, name, value) end
+    local profile = RXPSettings()
+    if profile then
+        for key, box in pairs(undo.rxp or {}) do profile[key] = DeepCopy(box.value) end
+    end
+    for name, value in pairs(undo.charAddons or {}) do
+        local current = _G[name]
+        if type(current) == "table" then
+            wipe(current)
+            for k, v in pairs(DeepCopy(value)) do current[k] = v end
+        end
+    end
+    UndoEditMode(undo)
+    RequestReload()
+end
+
 -- Save --------------------------------------------------------------------
 
 local function DoSave(name)
@@ -526,12 +878,15 @@ local function DoSave(name)
     CHAR.userSlots = {}
     for slot in pairs(slots) do CHAR.filled[slot] = true end
 
+    local ui = SaveUI()
     Print(("Saved %d actions as the %s profile \"%s\"."):format(count, className, name))
+    Print(("Saved the whole setup: %d changed game settings, %d macros%s%s, keybindings and addon layouts.")
+        :format(ui.cvars or 0, ui.macros, ui.editMode and ", the Edit Mode layout" or "", ui.rxp and ", RestedXP settings" or ""))
     OneClickBars_UpdateStatus()
 end
 
 StaticPopupDialogs["ONECLICKBARS_OVERWRITE"] = {
-    text = "Replace the %s profile \"%s\" with this character's bars?",
+    text = "Replace the %s profile \"%s\" and the saved setup with this character's?",
     button1 = YES,
     button2 = NO,
     OnAccept = function(_, data) DoSave(data) end,
@@ -648,10 +1003,18 @@ end
 local function DoLoad(quietIfMissing)
     local _, className = ClassKey()
     local profile, name = SelectedProfile()
+    local ui = DB.ui
     if not profile then
-        if not quietIfMissing then
+        if ui then
+            local r = WithApplying(ApplyUI, ui)
+            if r then
+                Print(("No %s bars saved yet. Applied the rest of the setup from %s: %d settings, %d new macros.")
+                    :format(className, ui.savedFrom or "?", r.cvars, r.macros))
+            end
+        elseif not quietIfMissing then
             Print("No " .. className .. " profile yet. Set up your bars on a " .. className .. " and press Save.")
         end
+        OneClickBars_UpdateStatus()
         return
     end
 
@@ -662,11 +1025,16 @@ local function DoLoad(quietIfMissing)
         local keys = DB.copyBindings ~= false and ApplyBindings(profile.bindings)
         local bars = ApplyBars(profile.bars)
         local pet = ApplyPetBar(profile)
+        -- Macros first, so bar slots that hold macros find them.
+        local uiResult = ui and ApplyUI(ui)
+        if uiResult and uiResult.macros > 0 then
+            ApplySlots(profile.slots, NewContext(false), filled)
+        end
         CHAR.applied = true
         CHAR.profile = name
         CHAR.filled = filled
         CHAR.userSlots = {}
-        return { placed = placed, waiting = waiting, keys = keys, bars = bars, pet = pet }
+        return { placed = placed, waiting = waiting, keys = keys, bars = bars, pet = pet, ui = uiResult }
     end)
     if not result then return end
 
@@ -677,6 +1045,15 @@ local function DoLoad(quietIfMissing)
     if result.keys then msg = msg .. " Keybindings copied." end
     if result.pet then msg = msg .. " Pet bar set." end
     Print(msg)
+    if result.ui then
+        local u = result.ui
+        Print(("Setup from %s: %d game settings, %d new macros, RestedXP settings %s, addon layouts %s.")
+            :format(ui.savedFrom or "?", u.cvars, u.macros, u.rxp > 0 and "copied" or "unchanged",
+                u.addons > 0 and "copied" or "unchanged"))
+        if u.cvarsWaiting > 0 then
+            Print(u.cvarsWaiting .. " settings can't change in combat. Click Load setup after the fight.")
+        end
+    end
     if result.bars then
         Print("Switched on the same action bars as the saved character. Type /reload if one doesn't appear.")
     end
@@ -701,8 +1078,8 @@ end
 local UndoSetup -- set in the leveling setup section
 
 function OneClickBars_Undo()
-    local snap, setup = CHAR.undo, CHAR.setupUndo
-    if not snap and not setup then
+    local snap, setup, uiUndo = CHAR.undo, CHAR.setupUndo, CHAR.uiUndo
+    if not snap and not setup and not uiUndo then
         Print("Nothing to undo.")
         return
     end
@@ -732,6 +1109,11 @@ function OneClickBars_Undo()
         CHAR.setupUndo = nil
         CHAR.setupDone = nil
         Print("Restored the game, RestedXP and Questie settings from before the leveling setup.")
+    end
+    if uiUndo then
+        UndoUI(uiUndo)
+        CHAR.uiUndo = nil
+        Print("Restored the game settings, Edit Mode layout and addon settings from before the load.")
     end
     OneClickBars_UpdateStatus()
 end
@@ -979,16 +1361,6 @@ local function SettingSlot(root, path)
     return root, path
 end
 
-StaticPopupDialogs["ONECLICKBARS_RELOAD"] = {
-    text = "Reload the interface so Questie uses its new settings?",
-    button1 = RELOADUI or "Reload",
-    button2 = LATER or "Later",
-    OnAccept = function() ReloadUI() end,
-    timeout = 0,
-    whileDead = true,
-    hideOnEscape = true,
-    preferredIndex = 3,
-}
 
 local function AddonLoaded(name)
     local fn = (C_AddOns and C_AddOns.IsAddOnLoaded) or _G.IsAddOnLoaded
@@ -1054,12 +1426,15 @@ local function DoLevelingSetup(quiet)
         return
     end
 
+    -- On a new character the saved setup already holds your exact choices,
+    -- so the automatic run only checks for problems. A click applies it all.
+    local covered = quiet and DB.ui ~= nil
     local undo = CHAR.setupUndo or {}
     undo.cvars = undo.cvars or {}
     undo.rxp = undo.rxp or {}
     undo.questie = undo.questie or {}
     local changed = 0
-    for _, pair in ipairs(LEVELING_CVARS) do
+    for _, pair in ipairs(covered and {} or LEVELING_CVARS) do
         local name, value = pair[1], pair[2]
         local current = GetCVarValue(name)
         if current ~= nil and current ~= value then
@@ -1073,7 +1448,7 @@ local function DoLevelingSetup(quiet)
 
     local rxpProfile = RXPProfile()
     local switched = 0
-    if rxpProfile then
+    if rxpProfile and not covered then
         for _, key in ipairs(RXP_SWITCHES) do
             if not rxpProfile[key] then
                 if undo.rxp[key] == nil then undo.rxp[key] = rxpProfile[key] or false end
@@ -1085,7 +1460,7 @@ local function DoLevelingSetup(quiet)
 
     local qp = QuestieProfile()
     local questieChanged = 0
-    if qp then
+    if qp and not covered then
         for _, pair in ipairs(QUESTIE_SETTINGS) do
             local path, value = pair[1], pair[2]
             local tbl, key = SettingSlot(qp, path)
@@ -1111,7 +1486,7 @@ local function DoLevelingSetup(quiet)
         Print(msg)
     end
     CheckAddons(false)
-    if questieChanged > 0 then StaticPopup_Show("ONECLICKBARS_RELOAD") end
+    if questieChanged > 0 then RequestReload() end
     OneClickBars_UpdateStatus()
 end
 
@@ -1135,7 +1510,7 @@ UndoSetup = function(undo)
             local tbl, key = SettingSlot(qp, path)
             if tbl then tbl[key] = value end
         end
-        StaticPopup_Show("ONECLICKBARS_RELOAD")
+        RequestReload()
     end
 end
 
@@ -1188,7 +1563,8 @@ function OneClickBars_UpdateStatus()
     local profile, name = SelectedProfile()
     if profile then
         frame.profileName:SetText(name)
-        frame.status:SetText(("%s: %d actions\nfrom %s"):format(className, profile.count or 0, profile.savedFrom or "?"))
+        frame.status:SetText(("%s: %d actions\nfrom %s"):format(className, profile.count or 0, profile.savedFrom or "?")
+            .. (DB.ui and "\nWhole setup saved" or ""))
     else
         frame.profileName:SetText("No profile")
         frame.status:SetText("No " .. className .. " profile saved yet")
@@ -1257,12 +1633,12 @@ local function CreateWindow()
     frame.profileName:SetPoint("LEFT", frame.prev, "RIGHT", 4, 0)
     frame.profileName:SetPoint("RIGHT", frame.next, "LEFT", -4, 0)
 
-    local load = Button(frame, "Load bars", 200, 34, OneClickBars_Load)
+    local load = Button(frame, "Load setup", 200, 34, OneClickBars_Load)
     load:SetPoint("TOP", 0, -64)
     load:SetNormalFontObject("GameFontNormalLarge")
     load:SetHighlightFontObject("GameFontHighlightLarge")
 
-    local save = Button(frame, "Save bars", 98, 26, OneClickBars_Save)
+    local save = Button(frame, "Save setup", 98, 26, OneClickBars_Save)
     save:SetPoint("TOPLEFT", load, "BOTTOMLEFT", 0, -6)
     local new = Button(frame, "New profile", 98, 26, OneClickBars_NewProfile)
     new:SetPoint("TOPRIGHT", load, "BOTTOMRIGHT", 0, -6)
@@ -1352,7 +1728,7 @@ function OneClickBars_Toggle()
 end
 
 _G.BINDING_HEADER_ONECLICKBARS = "OneClickBars"
-_G.BINDING_NAME_ONECLICKBARS_LOAD = "Load action bars"
+_G.BINDING_NAME_ONECLICKBARS_LOAD = "Load setup"
 _G.BINDING_NAME_ONECLICKBARS_UNDO = "Undo last load and setup"
 _G.BINDING_NAME_ONECLICKBARS_SETUP = "Leveling setup"
 _G.BINDING_NAME_ONECLICKBARS_RESETGUIDE = "Reset RestedXP guide"
@@ -1498,10 +1874,10 @@ events:SetScript("OnEvent", function(_, event, arg1)
                 end
             end)
             if DB.resetGuide ~= false and GetRXP() then
-                C_Timer.After(5, function() ResetGuide(1) end)
+                C_Timer.After(4, function() ResetGuide(1) end)
             end
             if DB.levelingSetup ~= false then
-                C_Timer.After(6, function() DoLevelingSetup(true) end)
+                C_Timer.After(4.5, function() DoLevelingSetup(true) end)
             end
         elseif CHAR.applied then
             QueueAutoFill()

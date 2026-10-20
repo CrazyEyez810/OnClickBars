@@ -4,8 +4,12 @@ A leveling and addon optimizer for WoW Forever. Set up your action bars once and
 
 ## How it works
 
-1. On a character with the bars you want, click "Save bars". This saves the layout, keybindings, which extra bars are switched on, and the pet bar, as a profile for that class.
-2. On another character of the same class, click "Load bars".
+"Save setup" on the character you set up captures the whole thing: action bars, keybindings, every macro, the Edit Mode layout, every game setting you changed, RestedXP settings and per-character addon layouts (WeaponSwingTimer). The first login on a new character puts it all back and asks once to reload (press Enter). "Undo" puts back what the character had before.
+
+For a new client folder (for example the live WoW Forever client after the beta), close WoW and run `tools/launch-day-copy.sh` from the World of Warcraft folder. It copies your addons and their account settings from the beta folder into the new one and backs up anything it replaces.
+
+1. On a character with the bars you want, click "Save setup". This saves the layout, keybindings, which extra bars are switched on, and the pet bar, as a profile for that class.
+2. On another character of the same class, click "Load setup".
 3. New level 1 characters load their class profile automatically on first login, and the opening cinematic is skipped.
 4. Spells you haven't learned yet are placed in their saved slot as soon as you learn them, including higher ranks. Slots you change by hand are left alone.
 5. "Leveling setup" turns on the interact key, auto loot, quest levels, enemy nameplates, XP numbers on the bar and other leveling settings, and switches on RestedXP's trainer, quest reward and junk automation. It also sets Questie to mark objectives, turn-ins and quest mobs while RestedXP picks the quests (tracker, auto-accept and off-route "!" icons off). It runs by itself on new level 1 characters and then checks your addons: Leatrix Plus doubling RestedXP's quest, gossip or junk automation, and addons RestedXP says break its arrow (TomTom, SilverDragon, TotemTimers, Leatrix Maps).
