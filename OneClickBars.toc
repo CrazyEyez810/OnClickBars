@@ -3,6 +3,7 @@
 ## Notes: Save your action bars once per class, then load them on any character on the account with one button.
 ## Version: 1.2.0
 ## OptionalDeps: RXPGuides
+## X-Curse-Project-ID: 1753232
 ## SavedVariables: OneClickBarsDB
 ## SavedVariablesPerCharacter: OneClickBarsChar
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
