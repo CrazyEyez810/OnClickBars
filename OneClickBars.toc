@@ -1,8 +1,8 @@
 ## Interface: 16001, 11509
 ## Title: OneClickBars
-## Notes: Save your action bars once per class, then load them on any character on the account with one button.
-## Version: 1.3.0
-## OptionalDeps: RXPGuides
+## Notes: Leveling and addon optimizer: copies your bars, keybindings and macros to new characters, sets up the game, RestedXP and Questie for fast leveling, and flags addon conflicts.
+## Version: 1.4.0
+## OptionalDeps: RXPGuides, Questie, Leatrix_Plus
 ## X-Curse-Project-ID: 1753232
 ## SavedVariables: OneClickBarsDB
 ## SavedVariablesPerCharacter: OneClickBarsChar

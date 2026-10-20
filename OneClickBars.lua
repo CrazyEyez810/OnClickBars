@@ -1,8 +1,9 @@
 -- OneClickBars
--- Save the action bars of one character as a profile for its class, then
--- load that profile on any other character of the same class on the account.
--- After a load, spells you have not learned yet are placed in their saved
--- slot the moment you learn them.
+-- Leveling and addon optimizer. Saves the action bars of one character as a
+-- profile for its class and loads it on any other character of that class.
+-- Spells you have not learned yet are placed in their saved slot the moment
+-- you learn them. The leveling setup tunes game settings, RestedXP and Questie
+-- and flags addon conflicts.
 
 local ADDON = ...
 
@@ -730,7 +731,7 @@ function OneClickBars_Undo()
         UndoSetup(setup)
         CHAR.setupUndo = nil
         CHAR.setupDone = nil
-        Print("Restored the game and RestedXP settings from before the leveling setup.")
+        Print("Restored the game, RestedXP and Questie settings from before the leveling setup.")
     end
     OneClickBars_UpdateStatus()
 end
@@ -945,6 +946,106 @@ local function RXPProfile()
     return rxp and rxp.settings and rxp.settings.profile
 end
 
+-- Questie settings for leveling with RestedXP in charge: RestedXP picks the
+-- quests and tracks steps, Questie only marks objectives, turn-ins, nameplates
+-- and tooltips. Questie's profile is shared by the whole account.
+local QUESTIE_SETTINGS = {
+    { "trackerEnabled", false },          -- RestedXP already lists the steps
+    { "autoAccept.enabled", false },      -- RestedXP accepts guide quests only
+    { "autocomplete", false },
+    { "enableAvailable", false },         -- no "!" icons for off-route quests
+    { "questAnnounceObjectives", false }, -- no party chat spam
+    { "questAnnounceItems", false },
+    { "enableObjectives", true },
+    { "enableTurnins", true },
+    { "nameplateEnabled", true },         -- quest icon on mobs you still need
+    { "enableTooltips", true },
+    { "enableMapIcons", true },
+    { "enableMiniMapIcons", true },
+}
+
+local function QuestieProfile()
+    local questie = _G.Questie
+    return questie and questie.db and questie.db.profile
+end
+
+-- Returns the table and key for a path like "autoAccept.enabled".
+local function SettingSlot(root, path)
+    local parent, key = path:match("^(.-)%.([^.]+)$")
+    if parent then
+        local tbl = root[parent]
+        return type(tbl) == "table" and tbl or nil, key
+    end
+    return root, path
+end
+
+StaticPopupDialogs["ONECLICKBARS_RELOAD"] = {
+    text = "Reload the interface so Questie uses its new settings?",
+    button1 = RELOADUI or "Reload",
+    button2 = LATER or "Later",
+    OnAccept = function() ReloadUI() end,
+    timeout = 0,
+    whileDead = true,
+    hideOnEscape = true,
+    preferredIndex = 3,
+}
+
+local function AddonLoaded(name)
+    local fn = (C_AddOns and C_AddOns.IsAddOnLoaded) or _G.IsAddOnLoaded
+    return fn and fn(name) and true or false
+end
+
+-- Addons RestedXP lists as breaking its waypoint arrow (RXPGuides/Help.lua).
+local ARROW_CONFLICTS = { "TomTom", "SilverDragon", "TotemTimers", "Leatrix_Maps" }
+
+-- Prints problems with the leveling addon setup. Returns the number found.
+local function CheckAddons(verbose)
+    local problems = 0
+    local function Warn(msg)
+        problems = problems + 1
+        Print(msg)
+    end
+
+    if not AddonLoaded("RXPGuides") then
+        Warn("RestedXP Guides isn't loaded. It plans the whole 1-20 route.")
+    end
+    if GetRXP() then
+        for _, name in ipairs(ARROW_CONFLICTS) do
+            if AddonLoaded(name) then
+                Warn(name .. " is on. RestedXP says it can break the waypoint arrow; turn it off while leveling.")
+            end
+        end
+    end
+
+    local rxpProfile = RXPProfile()
+    local lea = _G.LeaPlusDB
+    if lea and rxpProfile then
+        if lea.AutomateQuests == "On" and rxpProfile.enableQuestAutomation then
+            Warn("Leatrix Plus and RestedXP both accept quests. Turn off \"Automate quests\" in Leatrix so you only take guide quests.")
+        end
+        if lea.AutoSellJunk == "On" and rxpProfile.autoSellJunk then
+            Warn("Leatrix Plus and RestedXP both sell junk. Turn off \"Sell junk automatically\" in Leatrix.")
+        end
+        if lea.AutomateGossip == "On" and rxpProfile.enableGossipAutomation then
+            Warn("Leatrix Plus and RestedXP both skip gossip. Turn off \"Automate gossip\" in Leatrix.")
+        end
+    end
+
+    local qp = QuestieProfile()
+    if qp and rxpProfile and qp.autoAccept and qp.autoAccept.enabled then
+        Warn("Questie auto-accept is on. It takes quests RestedXP doesn't use; run Leveling setup to turn it off.")
+    end
+
+    if not GetBindingKey("INTERACTTARGET") then
+        Warn("Bind a key to \"Interact With Target\" in Key Bindings. It talks to NPCs, loots and clicks quest objects.")
+    end
+
+    if problems == 0 and verbose then
+        Print("Addon check: no conflicts found.")
+    end
+    return problems
+end
+
 local function DoLevelingSetup(quiet)
     if InCombatLockdown() then
         -- Some of these CVars can't be changed in combat.
@@ -953,7 +1054,10 @@ local function DoLevelingSetup(quiet)
         return
     end
 
-    local undo = CHAR.setupUndo or { cvars = {}, rxp = {} }
+    local undo = CHAR.setupUndo or {}
+    undo.cvars = undo.cvars or {}
+    undo.rxp = undo.rxp or {}
+    undo.questie = undo.questie or {}
     local changed = 0
     for _, pair in ipairs(LEVELING_CVARS) do
         local name, value = pair[1], pair[2]
@@ -979,7 +1083,21 @@ local function DoLevelingSetup(quiet)
         end
     end
 
-    if next(undo.cvars) or next(undo.rxp) then CHAR.setupUndo = undo end
+    local qp = QuestieProfile()
+    local questieChanged = 0
+    if qp then
+        for _, pair in ipairs(QUESTIE_SETTINGS) do
+            local path, value = pair[1], pair[2]
+            local tbl, key = SettingSlot(qp, path)
+            if tbl and tbl[key] ~= value then
+                if undo.questie[path] == nil then undo.questie[path] = tbl[key] and true or false end
+                tbl[key] = value
+                questieChanged = questieChanged + 1
+            end
+        end
+    end
+
+    if next(undo.cvars) or next(undo.rxp) or next(undo.questie) then CHAR.setupUndo = undo end
     CHAR.setupDone = true
 
     if changed + switched > 0 or not quiet then
@@ -987,20 +1105,13 @@ local function DoLevelingSetup(quiet)
         if rxpProfile then
             msg = msg .. (" RestedXP trainer, quest reward and junk automation on (%d changed)."):format(switched)
         end
+        if qp then
+            msg = msg .. (" Questie tuned for RestedXP (%d changed)."):format(questieChanged)
+        end
         Print(msg)
     end
-    if not GetBindingKey("INTERACTTARGET") then
-        Print("Bind a key to \"Interact With Target\" in Key Bindings. It talks to NPCs, loots and clicks quest objects.")
-    end
-    local lea = _G.LeaPlusDB
-    if lea and rxpProfile then
-        if lea.AutomateQuests == "On" and rxpProfile.enableQuestAutomation then
-            Print("Leatrix Plus and RestedXP both accept quests. Turn off \"Automate quests\" in Leatrix so you only take guide quests.")
-        end
-        if lea.AutoSellJunk == "On" and rxpProfile.autoSellJunk then
-            Print("Leatrix Plus and RestedXP both sell junk. Turn off \"Sell junk automatically\" in Leatrix.")
-        end
-    end
+    CheckAddons(false)
+    if questieChanged > 0 then StaticPopup_Show("ONECLICKBARS_RELOAD") end
     OneClickBars_UpdateStatus()
 end
 
@@ -1017,6 +1128,14 @@ UndoSetup = function(undo)
         for key, value in pairs(undo.rxp or {}) do
             rxpProfile[key] = value
         end
+    end
+    local qp = QuestieProfile()
+    if qp and undo.questie and next(undo.questie) then
+        for path, value in pairs(undo.questie) do
+            local tbl, key = SettingSlot(qp, path)
+            if tbl then tbl[key] = value end
+        end
+        StaticPopup_Show("ONECLICKBARS_RELOAD")
     end
 end
 
@@ -1317,6 +1436,8 @@ SlashCmdList.ONECLICKBARS = function(input)
         Print("Leveling setup on new level 1 characters: " .. argLower)
     elseif cmd == "setup" then
         OneClickBars_Setup()
+    elseif cmd == "check" then
+        CheckAddons(true)
     elseif cmd == "talents" then
         DB.talentTips = OnOff(argLower)
         Print("Talent reminders: " .. (DB.talentTips and "on" or "off"))
@@ -1324,7 +1445,7 @@ SlashCmdList.ONECLICKBARS = function(input)
         DeleteSelected()
     else
         Print("/1cb (show/hide), load, save, undo, new [name], use <name>, list, delete, scale 1.5, "
-            .. "auto on|off, keys on|off, intro on|off, new on|off, setup, setup on|off, talents on|off, "
+            .. "auto on|off, keys on|off, intro on|off, new on|off, setup, setup on|off, check, talents on|off, "
             .. "guide, guide here, guide on|off")
     end
 end
