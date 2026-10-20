@@ -11,10 +11,6 @@
 	<Binding name="ONECLICKBARS_RESETGUIDE" category="ADDONS">
 		OneClickBars_ResetGuide()
 	</Binding>
-	<Binding name="CLICK OneClickBarsTotemEarth:LeftButton" category="ADDONS"/>
-	<Binding name="CLICK OneClickBarsTotemFire:LeftButton" category="ADDONS"/>
-	<Binding name="CLICK OneClickBarsTotemWater:LeftButton" category="ADDONS"/>
-	<Binding name="CLICK OneClickBarsTotemAir:LeftButton" category="ADDONS"/>
 	<Binding name="ONECLICKBARS_TOGGLE" category="ADDONS">
 		OneClickBars_Toggle()
 	</Binding>

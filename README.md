@@ -9,7 +9,7 @@ A leveling and addon optimizer for WoW Forever. Set up your action bars once and
 3. New level 1 characters load their class profile automatically on first login, and the opening cinematic is skipped.
 4. Spells you haven't learned yet are placed in their saved slot as soon as you learn them, including higher ranks. Slots you change by hand are left alone.
 5. "Leveling setup" turns on the interact key, auto loot, quest levels, enemy nameplates, XP numbers on the bar and other leveling settings, and switches on RestedXP's trainer, quest reward and junk automation. It also sets Questie to mark objectives, turn-ins and quest mobs while RestedXP picks the quests (tracker, auto-accept and off-route "!" icons off). It runs by itself on new level 1 characters and then checks your addons: Leatrix Plus doubling RestedXP's quest, gossip or junk automation, and addons RestedXP says break its arrow (TomTom, SilverDragon, TotemTimers, Leatrix Maps).
-6. Shaman get an on-screen talent reminder at each level from 10 to 20, and a totem bar: one button per element with a countdown. Left-click drops that element's totem; right-click opens every totem of that element you know, and picking one drops it and makes it the button's totem, even in combat. Totems dropped another way become the button's totem after combat. Shift-drag moves the bar.
+6. Shaman get an on-screen talent reminder at each level from 10 to 20.
 7. "Undo" puts back the bars, keybindings and the game, RestedXP and Questie settings you had before the last load and leveling setup.
 
 Each class can have several profiles (for example leveling and raid). Use the arrows in the window to pick one, and "New profile" to add one.
@@ -35,11 +35,10 @@ If RestedXP Guides is installed, new level 1 characters start at step 1 of the 0
 - `/1cb setup` run the leveling setup, `/1cb setup off` stop running it on new characters
 - `/1cb check` check your addons for conflicts
 - `/1cb talents off` stop the talent reminders
-- `/1cb totems off` hide the totem bar, `/1cb totems scale 1.5` resize it
 - `/1cb new off` stop auto-loading on new characters
 - `/1cb guide off` stop the RestedXP reset on new characters
 
-Key bindings for "Load action bars", "Undo", "Leveling setup", "Reset RestedXP guide" and the four totem buttons (Earth, Fire, Water, Air) are under Key Bindings, AddOns.
+Key bindings for "Load action bars", "Undo", "Leveling setup" and "Reset RestedXP guide" are under Key Bindings, AddOns.
 
 ## Releases
 
