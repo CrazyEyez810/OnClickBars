@@ -1358,6 +1358,321 @@ _G.BINDING_NAME_ONECLICKBARS_SETUP = "Leveling setup"
 _G.BINDING_NAME_ONECLICKBARS_RESETGUIDE = "Reset RestedXP guide"
 _G.BINDING_NAME_ONECLICKBARS_TOGGLE = "Show or hide the window"
 
+-- Totem bar --------------------------------------------------------------
+
+-- One button per element. Left-click (or its keybind) drops the chosen totem;
+-- right-click opens a column of every totem of that element you know.
+-- Picking from the column drops that totem and makes it the button's totem,
+-- even in combat. A totem dropped some other way becomes the button's totem
+-- after combat, because addons can't change a button's spell during combat.
+
+local TOTEM_SIZE, TOTEM_GAP = 40, 6
+local ELEMENTS = {
+    { slot = _G.EARTH_TOTEM_SLOT or 2, key = "Earth" },
+    { slot = _G.FIRE_TOTEM_SLOT or 1, key = "Fire" },
+    { slot = _G.WATER_TOTEM_SLOT or 3, key = "Water" },
+    { slot = _G.AIR_TOTEM_SLOT or 4, key = "Air" },
+}
+
+-- Classic totems by slot. A totem missing here is learned the first time you
+-- drop it: the slot it lands in is remembered.
+local TOTEM_ELEMENT = {
+    ["Stoneskin Totem"] = 2, ["Earthbind Totem"] = 2, ["Strength of Earth Totem"] = 2,
+    ["Stoneclaw Totem"] = 2, ["Tremor Totem"] = 2,
+    ["Searing Totem"] = 1, ["Fire Nova Totem"] = 1, ["Frost Resistance Totem"] = 1,
+    ["Magma Totem"] = 1, ["Flametongue Totem"] = 1,
+    ["Healing Stream Totem"] = 3, ["Mana Spring Totem"] = 3, ["Poison Cleansing Totem"] = 3,
+    ["Disease Cleansing Totem"] = 3, ["Fire Resistance Totem"] = 3, ["Mana Tide Totem"] = 3,
+    ["Grounding Totem"] = 4, ["Nature Resistance Totem"] = 4, ["Windfury Totem"] = 4,
+    ["Grace of Air Totem"] = 4, ["Windwall Totem"] = 4, ["Tranquil Air Totem"] = 4,
+    ["Sentry Totem"] = 4,
+}
+
+local totemBar
+local totemButtons = {}
+local totemRebuildPending = false
+local totemChoicePending = {}
+local lastTotemCast
+
+local function TotemSlotFor(name)
+    return (DB.totemElements and DB.totemElements[name]) or TOTEM_ELEMENT[name]
+end
+
+local function SpellIcon(spell)
+    local texture = (C_Spell and C_Spell.GetSpellTexture and C_Spell.GetSpellTexture(spell))
+        or (_G.GetSpellTexture and _G.GetSpellTexture(spell))
+    return texture or 134400
+end
+
+-- Known totems grouped by slot, in spellbook order.
+local function KnownTotems()
+    local bySlot = {}
+    for name, info in pairs(BuildSpellBook()) do
+        if name:find(" Totem$") then
+            local slot = TotemSlotFor(name)
+            if slot then
+                bySlot[slot] = bySlot[slot] or {}
+                table.insert(bySlot[slot], { name = name, id = info.id, index = info.index })
+            end
+        end
+    end
+    for _, list in pairs(bySlot) do
+        table.sort(list, function(a, b) return a.index < b.index end)
+    end
+    return bySlot
+end
+
+local function ShowSpellTooltip(owner, lines)
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    for i, line in ipairs(lines) do
+        if i == 1 then GameTooltip:AddLine(line) else GameTooltip:AddLine(line, 1, 1, 1) end
+    end
+    GameTooltip:Show()
+end
+
+local function NewTotemButton(name, parent)
+    local b = CreateFrame("Button", name, parent, "SecureActionButtonTemplate")
+    b:SetSize(TOTEM_SIZE, TOTEM_SIZE)
+    b:RegisterForClicks("AnyUp", "AnyDown")
+    b:SetAttribute("type", "spell")
+    local border = b:CreateTexture(nil, "BACKGROUND")
+    border:SetColorTexture(0, 0, 0, 1)
+    border:SetPoint("TOPLEFT", -2, 2)
+    border:SetPoint("BOTTOMRIGHT", 2, -2)
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints()
+    b.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+    b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+    return b
+end
+
+local function UpdateTotemTimers()
+    for slot, main in pairs(totemButtons) do
+        local have, _, start, duration = GetTotemInfo(slot)
+        if have and duration and duration > 0 then
+            main.cooldown:SetCooldown(start, duration)
+            main.expires = start + duration
+        else
+            if main.cooldown.Clear then main.cooldown:Clear() else main.cooldown:SetCooldown(0, 0) end
+            main.expires = nil
+            main.timer:SetText("")
+        end
+    end
+end
+
+local function RebuildTotemBar()
+    if not totemBar then return end
+    if InCombatLockdown() then
+        totemRebuildPending = true
+        return
+    end
+    totemRebuildPending = false
+    CHAR.totemChoice = CHAR.totemChoice or {}
+    local known = KnownTotems()
+    local any = false
+
+    for slot, main in pairs(totemButtons) do
+        local list = known[slot] or {}
+        for i, entry in ipairs(list) do
+            local fb = main.flyoutButtons[i]
+            if not fb then
+                fb = NewTotemButton(nil, main.flyout)
+                fb:SetPoint("BOTTOM", main.flyout, "BOTTOM", 0, (i - 1) * (TOTEM_SIZE + 4))
+                SecureHandlerSetFrameRef(fb, "main", main)
+                SecureHandlerSetFrameRef(fb, "flyout", main.flyout)
+                totemBar:WrapScript(fb, "OnClick", [[
+                    if not down then
+                        self:GetFrameRef("main"):SetAttribute("spell", self:GetAttribute("spell"))
+                        self:GetFrameRef("flyout"):Hide()
+                    end
+                ]])
+                fb:SetScript("OnEnter", function(self)
+                    ShowSpellTooltip(self, { self:GetAttribute("spell") or "", "Click: drop it and make it this button's totem" })
+                end)
+                fb:SetScript("OnLeave", function() GameTooltip:Hide() end)
+                main.flyoutButtons[i] = fb
+            end
+            fb:SetAttribute("spell", entry.name)
+            fb.icon:SetTexture(SpellIcon(entry.id))
+            fb:Show()
+        end
+        for i = #list + 1, #main.flyoutButtons do main.flyoutButtons[i]:Hide() end
+        main.flyout:SetHeight(math.max(1, #list) * (TOTEM_SIZE + 4))
+
+        local choice = CHAR.totemChoice[slot]
+        local valid = false
+        for _, entry in ipairs(list) do
+            if entry.name == choice then valid = true end
+        end
+        if not valid then choice = list[1] and list[1].name end
+        if choice then
+            main:SetAttribute("spell", choice)
+            main.icon:SetTexture(SpellIcon(choice))
+            main:Show()
+            any = true
+        else
+            main:Hide()
+        end
+    end
+
+    totemBar:SetShown(any and DB.totemBar ~= false)
+    UpdateTotemTimers()
+end
+
+local function CreateTotemBar()
+    if totemBar or select(2, UnitClass("player")) ~= "SHAMAN" then return end
+    if InCombatLockdown() then
+        totemRebuildPending = true
+        return
+    end
+
+    totemBar = CreateFrame("Frame", "OneClickBarsTotemBar", UIParent, "SecureHandlerBaseTemplate")
+    totemBar:SetSize(TOTEM_SIZE * 4 + TOTEM_GAP * 3, TOTEM_SIZE)
+    totemBar:SetMovable(true)
+    totemBar:SetClampedToScreen(true)
+    local pos = DB.totemPos
+    if pos then
+        totemBar:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
+    else
+        totemBar:SetPoint("CENTER", UIParent, "CENTER", 0, -180)
+    end
+    totemBar:SetScale(DB.totemScale or 1.3)
+
+    for i, el in ipairs(ELEMENTS) do
+        local main = NewTotemButton("OneClickBarsTotem" .. el.key, totemBar)
+        main:SetPoint("LEFT", (i - 1) * (TOTEM_SIZE + TOTEM_GAP), 0)
+        main.slot = el.slot
+        main.element = el.key
+        main.flyoutButtons = {}
+
+        main.cooldown = CreateFrame("Cooldown", nil, main, "CooldownFrameTemplate")
+        main.cooldown:SetAllPoints()
+        if main.cooldown.SetHideCountdownNumbers then main.cooldown:SetHideCountdownNumbers(true) end
+        local overlay = CreateFrame("Frame", nil, main)
+        overlay:SetAllPoints()
+        overlay:SetFrameLevel(main.cooldown:GetFrameLevel() + 1)
+        main.timer = overlay:CreateFontString(nil, "OVERLAY", "GameFontNormalHuge")
+        main.timer:SetPoint("CENTER")
+        main.timer:SetTextColor(1, 1, 1)
+
+        main.flyout = CreateFrame("Frame", nil, main, "SecureHandlerBaseTemplate")
+        main.flyout:SetPoint("BOTTOM", main, "TOP", 0, 6)
+        main.flyout:SetSize(TOTEM_SIZE, TOTEM_SIZE)
+        main.flyout:Hide()
+        SecureHandlerSetFrameRef(main, "flyout", main.flyout)
+        totemBar:WrapScript(main, "OnClick", [[
+            if button == "RightButton" then
+                if not down then
+                    local flyout = self:GetFrameRef("flyout")
+                    if flyout:IsShown() then flyout:Hide() else flyout:Show() end
+                end
+                return false
+            end
+        ]])
+
+        main:HookScript("OnAttributeChanged", function(self, name, value)
+            if name == "spell" and value then
+                self.icon:SetTexture(SpellIcon(value))
+                CHAR.totemChoice = CHAR.totemChoice or {}
+                CHAR.totemChoice[self.slot] = value
+            end
+        end)
+        main:SetScript("OnEnter", function(self)
+            ShowSpellTooltip(self, {
+                self:GetAttribute("spell") or (self.element .. " totem"),
+                "Click: drop this totem",
+                "Right-click: pick another " .. self.element .. " totem",
+                "Shift-drag: move the bar",
+            })
+        end)
+        main:SetScript("OnLeave", function() GameTooltip:Hide() end)
+        main:RegisterForDrag("LeftButton")
+        main:SetScript("OnDragStart", function()
+            if IsShiftKeyDown() and not InCombatLockdown() then totemBar:StartMoving() end
+        end)
+        main:SetScript("OnDragStop", function()
+            totemBar:StopMovingOrSizing()
+            local point, _, relPoint, x, y = totemBar:GetPoint()
+            DB.totemPos = { point, relPoint, x, y }
+        end)
+
+        totemButtons[el.slot] = main
+    end
+
+    local elapsed = 0
+    totemBar:SetScript("OnUpdate", function(_, dt)
+        elapsed = elapsed + dt
+        if elapsed < 0.2 then return end
+        elapsed = 0
+        local now = GetTime()
+        for _, main in pairs(totemButtons) do
+            if main.expires then
+                local left = main.expires - now
+                if left <= 0 then
+                    main.timer:SetText("")
+                elseif left >= 60 then
+                    main.timer:SetText(("%dm"):format(math.ceil(left / 60)))
+                else
+                    main.timer:SetText(("%d"):format(math.ceil(left)))
+                end
+            end
+        end
+    end)
+
+    RebuildTotemBar()
+end
+
+local totemEvents = CreateFrame("Frame")
+totemEvents:RegisterEvent("PLAYER_ENTERING_WORLD")
+totemEvents:RegisterEvent("SPELLS_CHANGED")
+totemEvents:RegisterEvent("PLAYER_TOTEM_UPDATE")
+totemEvents:RegisterEvent("PLAYER_REGEN_ENABLED")
+totemEvents:RegisterUnitEvent("UNIT_SPELLCAST_SUCCEEDED", "player")
+totemEvents:SetScript("OnEvent", function(_, event, arg1, _, arg3)
+    if not DB then return end
+    if event == "PLAYER_ENTERING_WORLD" then
+        CreateTotemBar()
+    elseif event == "SPELLS_CHANGED" then
+        if totemBar then RebuildTotemBar() else CreateTotemBar() end
+    elseif event == "PLAYER_TOTEM_UPDATE" then
+        -- Remember which slot a totem lands in, for totems not in the list.
+        local have = GetTotemInfo(arg1)
+        if have and lastTotemCast and GetTime() - lastTotemCast.at < 1.5
+            and TotemSlotFor(lastTotemCast.name) ~= arg1 then
+            DB.totemElements = DB.totemElements or {}
+            DB.totemElements[lastTotemCast.name] = arg1
+            RebuildTotemBar()
+        end
+        UpdateTotemTimers()
+    elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
+        local name = arg3 and GetSpellName(arg3)
+        if name and name:find(" Totem$") then
+            lastTotemCast = { name = name, at = GetTime() }
+            local slot = TotemSlotFor(name)
+            local main = slot and totemButtons[slot]
+            if main and main:GetAttribute("spell") ~= name then
+                if InCombatLockdown() then
+                    totemChoicePending[slot] = name
+                else
+                    main:SetAttribute("spell", name)
+                end
+            end
+        end
+    elseif event == "PLAYER_REGEN_ENABLED" then
+        if not totemBar then CreateTotemBar() end
+        for slot, name in pairs(totemChoicePending) do
+            if totemButtons[slot] then totemButtons[slot]:SetAttribute("spell", name) end
+            totemChoicePending[slot] = nil
+        end
+        if totemRebuildPending then RebuildTotemBar() end
+    end
+end)
+
+_G["BINDING_NAME_CLICK OneClickBarsTotemEarth:LeftButton"] = "Earth totem"
+_G["BINDING_NAME_CLICK OneClickBarsTotemFire:LeftButton"] = "Fire totem"
+_G["BINDING_NAME_CLICK OneClickBarsTotemWater:LeftButton"] = "Water totem"
+_G["BINDING_NAME_CLICK OneClickBarsTotemAir:LeftButton"] = "Air totem"
+
 -- Slash command -----------------------------------------------------------
 
 local function OnOff(arg)
@@ -1436,6 +1751,20 @@ SlashCmdList.ONECLICKBARS = function(input)
         Print("Leveling setup on new level 1 characters: " .. argLower)
     elseif cmd == "setup" then
         OneClickBars_Setup()
+    elseif cmd == "totems" and argLower and argLower:match("^scale ") then
+        local value = tonumber(argLower:match("^scale (.+)$") or "")
+        if value then
+            DB.totemScale = math.max(0.5, math.min(3, value))
+            if totemBar and not InCombatLockdown() then totemBar:SetScale(DB.totemScale) end
+        end
+    elseif cmd == "totems" then
+        if InCombatLockdown() then
+            Print("Can't change the totem bar in combat.")
+            return
+        end
+        DB.totemBar = OnOff(argLower)
+        Print("Totem bar: " .. (DB.totemBar and "on" or "off"))
+        if totemBar then RebuildTotemBar() else CreateTotemBar() end
     elseif cmd == "check" then
         CheckAddons(true)
     elseif cmd == "talents" then
@@ -1446,6 +1775,7 @@ SlashCmdList.ONECLICKBARS = function(input)
     else
         Print("/1cb (show/hide), load, save, undo, new [name], use <name>, list, delete, scale 1.5, "
             .. "auto on|off, keys on|off, intro on|off, new on|off, setup, setup on|off, check, talents on|off, "
+            .. "totems on|off, totems scale 1.5, "
             .. "guide, guide here, guide on|off")
     end
 end
