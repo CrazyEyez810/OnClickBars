@@ -1,7 +1,7 @@
 ## Interface: 16001, 11509
 ## Title: OneClickBars
 ## Notes: Leveling and addon optimizer: copies your bars, keybindings and macros to new characters, sets up the game, RestedXP and Questie for fast leveling, and flags addon conflicts.
-## Version: 1.6.0
+## Version: 1.6.1
 ## OptionalDeps: RXPGuides, Questie, Leatrix_Plus
 ## X-Curse-Project-ID: 1753232
 ## SavedVariables: OneClickBarsDB

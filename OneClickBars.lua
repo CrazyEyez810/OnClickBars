@@ -1839,41 +1839,43 @@ local function Rates()
     return session, levelRate, totalRate
 end
 
-local function ShowXPTooltip(owner)
+local ORANGE = "|cffff9933"
+
+-- The stats as lines of colored text, laid out like XPTracker.
+local function XPLines()
     local cur, max = UnitXP("player"), UnitXPMax("player")
-    if max <= 0 then return end
+    if max <= 0 then return nil end
     local left = max - cur
     local toMax = XPToMaxLevel()
     local rested = GetXPExhaustion() or 0
     local session, levelRate, totalRate = Rates()
-
-    GameTooltip:SetOwner(owner, "ANCHOR_BOTTOM")
-    GameTooltip:AddLine("STATS", 1, 0.6, 0.2)
-    GameTooltip:AddLine(("%sCurrent XP: %s%d %s( %d rested)"):format(LABEL, VALUE, cur, EXTRA, rested))
-    GameTooltip:AddLine(("%sXP to level: %s%d %s( %d%% )"):format(LABEL, VALUE, left, EXTRA,
-        100 - math.floor(cur / max * 100)))
+    local lines = {
+        ORANGE .. "STATS",
+        ("%sCurrent XP: %s%d %s( %d rested)"):format(LABEL, VALUE, cur, EXTRA, rested),
+        ("%sXP to level: %s%d %s( %d%% )"):format(LABEL, VALUE, left, EXTRA, 100 - math.floor(cur / max * 100)),
+    }
     if xpState.killXP and xpState.killXP > 0 then
-        GameTooltip:AddLine(("%sKills to level: %s~%d %s( %d per kill)"):format(LABEL, VALUE,
-            math.ceil(left / xpState.killXP), EXTRA, xpState.killXP))
+        lines[#lines + 1] = ("%sKills to level: %s~%d %s( %d per kill)"):format(LABEL, VALUE,
+            math.ceil(left / xpState.killXP), EXTRA, xpState.killXP)
     else
-        GameTooltip:AddLine(("%sKills to level: %s--"):format(LABEL, VALUE))
+        lines[#lines + 1] = ("%sKills to level: %s--"):format(LABEL, VALUE)
     end
 
     local function Block(name, rate)
-        GameTooltip:AddLine(" ")
+        lines[#lines + 1] = " "
         if rate then
-            GameTooltip:AddLine(("%s%s: %s%d %s/ h %s( %.2f%% )"):format(LABEL, name, VALUE,
-                math.floor(rate + 0.5), LABEL, EXTRA, rate / max * 100))
+            lines[#lines + 1] = ("%s%s: %s%d %s/ h %s( %.2f%% )"):format(LABEL, name, VALUE,
+                math.floor(rate + 0.5), LABEL, EXTRA, rate / max * 100)
         else
-            GameTooltip:AddLine(("%s%s: %s--"):format(LABEL, name, VALUE))
+            lines[#lines + 1] = ("%s%s: %s--"):format(LABEL, name, VALUE)
         end
-        GameTooltip:AddLine(("%sTime to level: %s%s"):format(LABEL, VALUE, FormatTime(left, rate)))
-        GameTooltip:AddLine(("%sTime to level %d: %s%s"):format(LABEL, MaxLevel(), VALUE, FormatTime(toMax, rate)))
+        lines[#lines + 1] = ("%sTime to level: %s%s"):format(LABEL, VALUE, FormatTime(left, rate))
+        lines[#lines + 1] = ("%sTime to level %d: %s%s"):format(LABEL, MaxLevel(), VALUE, FormatTime(toMax, rate))
     end
     Block("Session XP", session)
     Block("Level XP", levelRate)
     Block("Total XP", totalRate)
-    GameTooltip:Show()
+    return lines
 end
 
 local function UpdateXPLine()
@@ -1881,45 +1883,40 @@ local function UpdateXPLine()
     local atMax = UnitLevel("player") >= MaxLevel()
     xpFrame:SetShown(DB.xpTracker ~= false and not atMax)
     if atMax then return end
-    local cur, max = UnitXP("player"), UnitXPMax("player")
-    if max <= 0 then return end
-    local left = max - cur
-    local session, levelRate = Rates()
-    local parts = { ("%d%%"):format(math.floor(cur / max * 100)) }
-    if xpState.killXP and xpState.killXP > 0 then
-        parts[#parts + 1] = ("~%d kills"):format(math.ceil(left / xpState.killXP))
-    end
-    local rate = session or levelRate
-    if rate then parts[#parts + 1] = FormatTime(left, rate) end
-    xpFrame.text:SetText(table.concat(parts, "   "))
-    xpFrame:SetWidth(xpFrame.text:GetStringWidth() + 20)
-    if GameTooltip:IsOwned(xpFrame) then ShowXPTooltip(xpFrame) end
+    local lines = XPLines()
+    if not lines then return end
+    xpFrame.text:SetText(table.concat(lines, "\n"))
+    xpFrame:SetSize(xpFrame.text:GetStringWidth() + 24, xpFrame.text:GetStringHeight() + 20)
 end
 
 local function CreateXPFrame()
     if xpFrame then return end
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
-    xpFrame = CreateFrame("Button", "OneClickBarsXP", UIParent, template)
-    xpFrame:SetSize(120, 26)
+    xpFrame = CreateFrame("Frame", "OneClickBarsXP", UIParent, template)
+    xpFrame:SetSize(220, 240)
     xpFrame:SetClampedToScreen(true)
     xpFrame:SetMovable(true)
+    xpFrame:EnableMouse(true)
     xpFrame:RegisterForDrag("LeftButton")
     if xpFrame.SetBackdrop then
         xpFrame:SetBackdrop({
             bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
             edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-            tile = true, tileSize = 16, edgeSize = 12,
-            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+            tile = true, tileSize = 16, edgeSize = 16,
+            insets = { left = 4, right = 4, top = 4, bottom = 4 },
         })
-        xpFrame:SetBackdropColor(0, 0, 0, 0.85)
+        xpFrame:SetBackdropColor(0, 0, 0, 0.75)
+        xpFrame:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
     end
     xpFrame.text = xpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    xpFrame.text:SetPoint("CENTER")
+    xpFrame.text:SetPoint("TOPLEFT", 12, -10)
+    xpFrame.text:SetJustifyH("LEFT")
+    xpFrame.text:SetSpacing(2)
     local pos = DB.xpPos
     if pos then
         xpFrame:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
     else
-        xpFrame:SetPoint("TOP", UIParent, "TOP", 0, -12)
+        xpFrame:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -220, -20)
     end
     xpFrame:SetScale(DB.xpScale or 1.2)
     xpFrame:SetScript("OnDragStart", xpFrame.StartMoving)
@@ -1928,8 +1925,6 @@ local function CreateXPFrame()
         local point, _, relPoint, x, y = self:GetPoint()
         DB.xpPos = { point, relPoint, x, y }
     end)
-    xpFrame:SetScript("OnEnter", ShowXPTooltip)
-    xpFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
     local elapsed = 0
     xpFrame:SetScript("OnUpdate", function(_, dt)
         elapsed = elapsed + dt
