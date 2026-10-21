@@ -1735,6 +1735,258 @@ _G.BINDING_NAME_ONECLICKBARS_SETUP = "Leveling setup"
 _G.BINDING_NAME_ONECLICKBARS_RESETGUIDE = "Reset RestedXP guide"
 _G.BINDING_NAME_ONECLICKBARS_TOGGLE = "Show or hide the window"
 
+-- XP tracker --------------------------------------------------------------
+
+-- A small line with level progress, kills and time to level. Hovering it
+-- shows the full stats. Rates: session = XP since login; level = XP into
+-- this level over time played this level; total = all XP earned over total
+-- time played.
+
+-- XP needed to go from each level to the next (Classic values, which
+-- Forever keeps; 4,084,700 to reach 60).
+local XP_TABLE = {
+    400, 900, 1400, 2100, 2800, 3600, 4500, 5400, 6500, 7600,
+    8800, 10100, 11400, 12900, 14400, 16000, 17700, 19400, 21300, 23200,
+    25200, 27300, 29400, 31700, 34000, 36400, 38900, 41400, 44300, 47400,
+    50800, 54500, 58600, 62800, 67100, 71600, 76100, 80800, 85700, 90700,
+    95800, 101000, 106300, 111800, 117500, 123200, 129100, 135100, 141200, 147500,
+    153900, 160400, 167100, 173900, 180800, 187900, 195000, 202300, 209800,
+}
+
+local LABEL, VALUE, EXTRA = "|cffd8d8d8", "|cffffffff", "|cffffd100"
+
+local xpFrame
+local xpState = {
+    sessionStart = nil, sessionGained = 0,
+    lastXP = nil, lastMax = nil, lastLevel = nil,
+    killXP = nil,
+    playedTotal = nil, playedLevel = nil, playedAt = nil,
+}
+local quietPlayed = false
+
+-- Ask the server for time played without printing it in chat.
+local function RequestPlayedQuietly()
+    quietPlayed = true
+    C_Timer.After(3, function() quietPlayed = false end)
+    RequestTimePlayed()
+end
+
+if ChatFrameUtil and ChatFrameUtil.DisplayTimePlayed then
+    local original = ChatFrameUtil.DisplayTimePlayed
+    ChatFrameUtil.DisplayTimePlayed = function(...)
+        if quietPlayed then return end
+        return original(...)
+    end
+elseif _G.ChatFrame_DisplayTimePlayed then
+    local original = _G.ChatFrame_DisplayTimePlayed
+    _G.ChatFrame_DisplayTimePlayed = function(...)
+        if quietPlayed then return end
+        return original(...)
+    end
+end
+
+-- "%s dies, you gain %d experience." turned into a Lua pattern.
+local KILL_PATTERN
+do
+    local fmt = _G.COMBATLOG_XPGAIN_FIRSTPERSON
+    if fmt then
+        local pattern = fmt:gsub("[%(%)%.%+%-%*%?%[%]%^%$]", "%%%0")
+        pattern = pattern:gsub("%%s", ".+"):gsub("%%d", "(%%d+)")
+        KILL_PATTERN = pattern
+    end
+end
+
+local function MaxLevel()
+    return (GetMaxPlayerLevel and GetMaxPlayerLevel()) or 60
+end
+
+local function XPToMaxLevel()
+    local level = UnitLevel("player")
+    local left = UnitXPMax("player") - UnitXP("player")
+    for l = level + 1, MaxLevel() - 1 do left = left + (XP_TABLE[l] or 0) end
+    return left
+end
+
+local function TotalEarned()
+    local total = UnitXP("player")
+    for l = 1, UnitLevel("player") - 1 do total = total + (XP_TABLE[l] or 0) end
+    return total
+end
+
+local function Played()
+    if not xpState.playedAt then return nil, nil end
+    local since = GetTime() - xpState.playedAt
+    return xpState.playedTotal + since, xpState.playedLevel + since
+end
+
+local function FormatTime(xpLeft, perHour)
+    if not perHour or perHour <= 0 then return "--" end
+    local hours = xpLeft / perHour
+    if hours < 1 then return ("%dmin"):format(math.max(1, math.floor(hours * 60))) end
+    if hours < 24 then return ("%.1fh"):format(hours) end
+    return ("%.1fdays"):format(hours / 24)
+end
+
+local function Rates()
+    local session
+    if xpState.sessionStart and xpState.sessionGained > 0 then
+        local hours = (GetTime() - xpState.sessionStart) / 3600
+        if hours > 0 then session = xpState.sessionGained / hours end
+    end
+    local total, level = Played()
+    local levelRate = level and level > 0 and UnitXP("player") / (level / 3600) or nil
+    local totalRate = total and total > 0 and TotalEarned() / (total / 3600) or nil
+    return session, levelRate, totalRate
+end
+
+local function ShowXPTooltip(owner)
+    local cur, max = UnitXP("player"), UnitXPMax("player")
+    if max <= 0 then return end
+    local left = max - cur
+    local toMax = XPToMaxLevel()
+    local rested = GetXPExhaustion() or 0
+    local session, levelRate, totalRate = Rates()
+
+    GameTooltip:SetOwner(owner, "ANCHOR_BOTTOM")
+    GameTooltip:AddLine("STATS", 1, 0.6, 0.2)
+    GameTooltip:AddLine(("%sCurrent XP: %s%d %s( %d rested)"):format(LABEL, VALUE, cur, EXTRA, rested))
+    GameTooltip:AddLine(("%sXP to level: %s%d %s( %d%% )"):format(LABEL, VALUE, left, EXTRA,
+        100 - math.floor(cur / max * 100)))
+    if xpState.killXP and xpState.killXP > 0 then
+        GameTooltip:AddLine(("%sKills to level: %s~%d %s( %d per kill)"):format(LABEL, VALUE,
+            math.ceil(left / xpState.killXP), EXTRA, xpState.killXP))
+    else
+        GameTooltip:AddLine(("%sKills to level: %s--"):format(LABEL, VALUE))
+    end
+
+    local function Block(name, rate)
+        GameTooltip:AddLine(" ")
+        if rate then
+            GameTooltip:AddLine(("%s%s: %s%d %s/ h %s( %.2f%% )"):format(LABEL, name, VALUE,
+                math.floor(rate + 0.5), LABEL, EXTRA, rate / max * 100))
+        else
+            GameTooltip:AddLine(("%s%s: %s--"):format(LABEL, name, VALUE))
+        end
+        GameTooltip:AddLine(("%sTime to level: %s%s"):format(LABEL, VALUE, FormatTime(left, rate)))
+        GameTooltip:AddLine(("%sTime to level %d: %s%s"):format(LABEL, MaxLevel(), VALUE, FormatTime(toMax, rate)))
+    end
+    Block("Session XP", session)
+    Block("Level XP", levelRate)
+    Block("Total XP", totalRate)
+    GameTooltip:Show()
+end
+
+local function UpdateXPLine()
+    if not xpFrame then return end
+    local atMax = UnitLevel("player") >= MaxLevel()
+    xpFrame:SetShown(DB.xpTracker ~= false and not atMax)
+    if atMax then return end
+    local cur, max = UnitXP("player"), UnitXPMax("player")
+    if max <= 0 then return end
+    local left = max - cur
+    local session, levelRate = Rates()
+    local parts = { ("%d%%"):format(math.floor(cur / max * 100)) }
+    if xpState.killXP and xpState.killXP > 0 then
+        parts[#parts + 1] = ("~%d kills"):format(math.ceil(left / xpState.killXP))
+    end
+    local rate = session or levelRate
+    if rate then parts[#parts + 1] = FormatTime(left, rate) end
+    xpFrame.text:SetText(table.concat(parts, "   "))
+    xpFrame:SetWidth(xpFrame.text:GetStringWidth() + 20)
+    if GameTooltip:IsOwned(xpFrame) then ShowXPTooltip(xpFrame) end
+end
+
+local function CreateXPFrame()
+    if xpFrame then return end
+    local template = BackdropTemplateMixin and "BackdropTemplate" or nil
+    xpFrame = CreateFrame("Button", "OneClickBarsXP", UIParent, template)
+    xpFrame:SetSize(120, 26)
+    xpFrame:SetClampedToScreen(true)
+    xpFrame:SetMovable(true)
+    xpFrame:RegisterForDrag("LeftButton")
+    if xpFrame.SetBackdrop then
+        xpFrame:SetBackdrop({
+            bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+            edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+            tile = true, tileSize = 16, edgeSize = 12,
+            insets = { left = 3, right = 3, top = 3, bottom = 3 },
+        })
+        xpFrame:SetBackdropColor(0, 0, 0, 0.85)
+    end
+    xpFrame.text = xpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    xpFrame.text:SetPoint("CENTER")
+    local pos = DB.xpPos
+    if pos then
+        xpFrame:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
+    else
+        xpFrame:SetPoint("TOP", UIParent, "TOP", 0, -12)
+    end
+    xpFrame:SetScale(DB.xpScale or 1.2)
+    xpFrame:SetScript("OnDragStart", xpFrame.StartMoving)
+    xpFrame:SetScript("OnDragStop", function(self)
+        self:StopMovingOrSizing()
+        local point, _, relPoint, x, y = self:GetPoint()
+        DB.xpPos = { point, relPoint, x, y }
+    end)
+    xpFrame:SetScript("OnEnter", ShowXPTooltip)
+    xpFrame:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    local elapsed = 0
+    xpFrame:SetScript("OnUpdate", function(_, dt)
+        elapsed = elapsed + dt
+        if elapsed >= 1 then
+            elapsed = 0
+            UpdateXPLine()
+        end
+    end)
+end
+
+local xpEvents = CreateFrame("Frame")
+xpEvents:RegisterEvent("PLAYER_ENTERING_WORLD")
+xpEvents:RegisterEvent("PLAYER_XP_UPDATE")
+xpEvents:RegisterEvent("PLAYER_LEVEL_UP")
+xpEvents:RegisterEvent("TIME_PLAYED_MSG")
+xpEvents:RegisterEvent("CHAT_MSG_COMBAT_XP_GAIN")
+xpEvents:SetScript("OnEvent", function(_, event, arg1, arg2)
+    if not DB then return end
+    if event == "PLAYER_ENTERING_WORLD" then
+        CreateXPFrame()
+        if not xpState.sessionStart then
+            xpState.sessionStart = GetTime()
+            xpState.lastXP, xpState.lastMax = UnitXP("player"), UnitXPMax("player")
+            xpState.lastLevel = UnitLevel("player")
+            xpState.killXP = CHAR.lastKillXP
+            C_Timer.After(2, RequestPlayedQuietly)
+        end
+        UpdateXPLine()
+    elseif event == "PLAYER_XP_UPDATE" then
+        local cur, max, level = UnitXP("player"), UnitXPMax("player"), UnitLevel("player")
+        if xpState.lastXP then
+            local gained = level == xpState.lastLevel and cur - xpState.lastXP
+                or (xpState.lastMax - xpState.lastXP) + cur
+            if gained > 0 then xpState.sessionGained = xpState.sessionGained + gained end
+        end
+        xpState.lastXP, xpState.lastMax, xpState.lastLevel = cur, max, level
+        UpdateXPLine()
+    elseif event == "PLAYER_LEVEL_UP" then
+        -- Time played this level starts over.
+        local total = Played()
+        if total then
+            xpState.playedTotal, xpState.playedLevel, xpState.playedAt = total, 0, GetTime()
+        end
+        UpdateXPLine()
+    elseif event == "TIME_PLAYED_MSG" then
+        xpState.playedTotal, xpState.playedLevel, xpState.playedAt = arg1, arg2, GetTime()
+        UpdateXPLine()
+    elseif event == "CHAT_MSG_COMBAT_XP_GAIN" then
+        local amount = KILL_PATTERN and tonumber(arg1:match(KILL_PATTERN) or "")
+        if amount and amount > 0 then
+            xpState.killXP = amount
+            CHAR.lastKillXP = amount
+            UpdateXPLine()
+        end
+    end
+end)
+
 -- Slash command -----------------------------------------------------------
 
 local function OnOff(arg)
@@ -1813,6 +2065,16 @@ SlashCmdList.ONECLICKBARS = function(input)
         Print("Leveling setup on new level 1 characters: " .. argLower)
     elseif cmd == "setup" then
         OneClickBars_Setup()
+    elseif cmd == "xp" and argLower and argLower:match("^scale ") then
+        local value = tonumber(argLower:match("^scale (.+)$") or "")
+        if value and xpFrame then
+            DB.xpScale = math.max(0.5, math.min(3, value))
+            xpFrame:SetScale(DB.xpScale)
+        end
+    elseif cmd == "xp" then
+        DB.xpTracker = OnOff(argLower)
+        Print("XP tracker: " .. (DB.xpTracker and "on" or "off"))
+        UpdateXPLine()
     elseif cmd == "check" then
         CheckAddons(true)
     elseif cmd == "talents" then
@@ -1823,6 +2085,7 @@ SlashCmdList.ONECLICKBARS = function(input)
     else
         Print("/1cb (show/hide), load, save, undo, new [name], use <name>, list, delete, scale 1.5, "
             .. "auto on|off, keys on|off, intro on|off, new on|off, setup, setup on|off, check, talents on|off, "
+            .. "xp on|off, xp scale 1.5, "
             .. "guide, guide here, guide on|off")
     end
 end
