@@ -1850,7 +1850,6 @@ local function XPLines()
     local rested = GetXPExhaustion() or 0
     local session, levelRate, totalRate = Rates()
     local lines = {
-        ORANGE .. "STATS",
         ("%sCurrent XP: %s%d %s( %d rested)"):format(LABEL, VALUE, cur, EXTRA, rested),
         ("%sXP to level: %s%d %s( %d%% )"):format(LABEL, VALUE, left, EXTRA, 100 - math.floor(cur / max * 100)),
     }
@@ -1878,15 +1877,41 @@ local function XPLines()
     return lines
 end
 
+-- Short summary for the collapsed header: level %, kills and time to level.
+local function XPSummary()
+    local cur, max = UnitXP("player"), UnitXPMax("player")
+    if max <= 0 then return "" end
+    local left = max - cur
+    local parts = { ("%d%%"):format(math.floor(cur / max * 100)) }
+    if xpState.killXP and xpState.killXP > 0 then
+        parts[#parts + 1] = ("~%d kills"):format(math.ceil(left / xpState.killXP))
+    end
+    local session, levelRate = Rates()
+    local rate = session or levelRate
+    if rate then parts[#parts + 1] = FormatTime(left, rate) end
+    return table.concat(parts, "   ")
+end
+
 local function UpdateXPLine()
     if not xpFrame then return end
     local atMax = UnitLevel("player") >= MaxLevel()
     xpFrame:SetShown(DB.xpTracker ~= false and not atMax)
     if atMax then return end
-    local lines = XPLines()
-    if not lines then return end
-    xpFrame.text:SetText(table.concat(lines, "\n"))
-    xpFrame:SetSize(xpFrame.text:GetStringWidth() + 24, xpFrame.text:GetStringHeight() + 20)
+    local collapsed = DB.xpCollapsed
+    if collapsed then
+        xpFrame.header:SetText(ORANGE .. "STATS  " .. VALUE .. XPSummary() .. "  " .. LABEL .. "[+]")
+        xpFrame.text:Hide()
+        xpFrame:SetSize(xpFrame.header:GetStringWidth() + 24, xpFrame.header:GetStringHeight() + 16)
+    else
+        local lines = XPLines()
+        if not lines then return end
+        xpFrame.header:SetText(ORANGE .. "STATS  " .. LABEL .. "[-]")
+        xpFrame.text:SetText(table.concat(lines, "\n"))
+        xpFrame.text:Show()
+        local width = math.max(xpFrame.header:GetStringWidth(), xpFrame.text:GetStringWidth())
+        xpFrame:SetSize(width + 24, xpFrame.header:GetStringHeight() + xpFrame.text:GetStringHeight() + 22)
+    end
+    xpFrame.toggle:SetSize(xpFrame.header:GetStringWidth(), xpFrame.header:GetStringHeight() + 4)
 end
 
 local function CreateXPFrame()
@@ -1908,17 +1933,39 @@ local function CreateXPFrame()
         xpFrame:SetBackdropColor(0, 0, 0, 0.75)
         xpFrame:SetBackdropBorderColor(0.6, 0.6, 0.6, 1)
     end
+    xpFrame.header = xpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    xpFrame.header:SetPoint("TOPLEFT", 12, -8)
+    xpFrame.header:SetJustifyH("LEFT")
     xpFrame.text = xpFrame:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    xpFrame.text:SetPoint("TOPLEFT", 12, -10)
+    xpFrame.text:SetPoint("TOPLEFT", xpFrame.header, "BOTTOMLEFT", 0, -6)
     xpFrame.text:SetJustifyH("LEFT")
     xpFrame.text:SetSpacing(2)
+
+    -- Clicking the STATS line collapses or opens the panel; dragging it
+    -- still moves the panel.
+    xpFrame.toggle = CreateFrame("Button", nil, xpFrame)
+    xpFrame.toggle:SetPoint("TOPLEFT", xpFrame.header, "TOPLEFT", 0, 2)
+    xpFrame.toggle:RegisterForClicks("LeftButtonUp")
+    xpFrame.toggle:RegisterForDrag("LeftButton")
+    xpFrame.toggle:SetScript("OnClick", function()
+        DB.xpCollapsed = not DB.xpCollapsed
+        UpdateXPLine()
+    end)
+    xpFrame.toggle:SetScript("OnDragStart", function() xpFrame:StartMoving() end)
+    xpFrame.toggle:SetScript("OnDragStop", function() xpFrame:GetScript("OnDragStop")(xpFrame) end)
+
     local pos = DB.xpPos
     if pos then
         xpFrame:SetPoint(pos[1], UIParent, pos[2], pos[3], pos[4])
     else
         xpFrame:SetPoint("TOPRIGHT", UIParent, "TOPRIGHT", -220, -20)
     end
-    xpFrame:SetScale(DB.xpScale or 1.2)
+    -- 25% smaller than the first version (1.2 to 0.9), once.
+    if not DB.xpScaleReduced then
+        DB.xpScale = (DB.xpScale or 1.2) * 0.75
+        DB.xpScaleReduced = true
+    end
+    xpFrame:SetScale(DB.xpScale)
     xpFrame:SetScript("OnDragStart", xpFrame.StartMoving)
     xpFrame:SetScript("OnDragStop", function(self)
         self:StopMovingOrSizing()

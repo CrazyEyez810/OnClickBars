@@ -22,7 +22,7 @@ OneClickBars copies spells, macros, items, mounts, equipment sets, stance bars, 
 
 ## XP tracker
 
-A stats panel stays on screen: current and rested XP, XP and kills to level, and XP per hour with time to level and time to 60 for this session, this level and all time played. Drag it to move it. `/1cb xp off` hides it, `/1cb xp scale 1.5` resizes it.
+A stats panel stays on screen: current and rested XP, XP and kills to level, and XP per hour with time to level and time to 60 for this session, this level and all time played. Click the STATS line to collapse it to one line (level %, kills and time to level) or open it again. Drag it to move it. `/1cb xp off` hides it, `/1cb xp scale 1.5` resizes it.
 
 ## RestedXP support
 
