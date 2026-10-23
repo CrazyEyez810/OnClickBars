@@ -1,0 +1,4 @@
+package-as: OneClickMail
+
+ignore:
+  - README.md

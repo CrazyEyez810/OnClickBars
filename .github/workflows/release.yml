@@ -4,12 +4,14 @@ name: Release
 #   OneClickBars-v1.7.0  packages OneClickBars/
 #   OneClickXP-v1.0.0    packages OneClickXP/
 #   OneClickPace-v0.1.0  packages OneClickPace/
+#   OneClickMail-v0.1.0  packages OneClickMail/
 on:
   push:
     tags:
       - "OneClickBars-v*"
       - "OneClickXP-v*"
       - "OneClickPace-v*"
+      - "OneClickMail-v*"
 
 jobs:
   release:

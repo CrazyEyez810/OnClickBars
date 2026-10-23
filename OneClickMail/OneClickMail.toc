@@ -1,0 +1,8 @@
+## Interface: 11509, 16001
+## Title: OneClickMail
+## Notes: Mail items to your own alts by rules from a One Click tab in the mailbox, so you never pick a stranger from the name autofill.
+## Version: 0.1.0
+## SavedVariables: OneClickMailDB
+## IconTexture: Interface\Icons\INV_Letter_15
+
+OneClickMail.lua
