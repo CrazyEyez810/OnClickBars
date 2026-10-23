@@ -2,7 +2,8 @@
 -- An on-screen XP panel: current and rested XP, XP and kills to level, and
 -- XP per hour with time to level and time to max level for this session,
 -- this level and all time played. Click STATS to collapse it to one line.
--- Rates: session = XP since login; level = XP into this level over time
+-- Rates: last N minutes = rolling window (the main estimate); session = XP
+-- since login; level = XP into this level over time
 -- played this level; total = all XP earned over total time played.
 
 local ADDON = ...
@@ -140,6 +141,40 @@ local function FormatTime(xpLeft, perHour)
     return ("%.1fdays"):format(hours / 24)
 end
 
+-- Rolling rate: XP from the last few minutes of play (15 by default),
+-- divided by that window. Right after you start playing the window is
+-- shorter, but never under 3 minutes, so one early quest can't spike it.
+-- Gains are saved per character, so /reload keeps them.
+local MIN_SPAN = 180
+
+local function WindowSeconds()
+    return (DB.window or 15) * 60
+end
+
+local function PruneGains()
+    local window, now = WindowSeconds(), time()
+    local keep = {}
+    for _, gain in ipairs(CHAR.recent or {}) do
+        if now - gain.t < window then keep[#keep + 1] = gain end
+    end
+    CHAR.recent = keep
+end
+
+local function RecordGain(amount)
+    CHAR.recent = CHAR.recent or {}
+    CHAR.recent[#CHAR.recent + 1] = { t = time(), xp = amount }
+end
+
+local function RollingRate()
+    if not CHAR.recentStart then return nil end
+    PruneGains()
+    local sum = 0
+    for _, gain in ipairs(CHAR.recent) do sum = sum + gain.xp end
+    if sum <= 0 then return nil end
+    local span = math.min(WindowSeconds(), math.max(MIN_SPAN, time() - CHAR.recentStart))
+    return sum / (span / 3600)
+end
+
 local function Rates()
     local session
     if xpState.sessionStart and xpState.sessionGained > 0 then
@@ -162,6 +197,7 @@ local function XPLines()
     local toMax = XPToMaxLevel()
     local rested = GetXPExhaustion() or 0
     local session, levelRate, totalRate = Rates()
+    local rolling = RollingRate()
     local lines = {
         ("%sCurrent XP: %s%d %s( %d rested)"):format(LABEL, VALUE, cur, EXTRA, rested),
         ("%sXP to level: %s%d %s( %d%% )"):format(LABEL, VALUE, left, EXTRA, 100 - math.floor(cur / max * 100)),
@@ -184,6 +220,7 @@ local function XPLines()
         lines[#lines + 1] = ("%sTime to level: %s%s"):format(LABEL, VALUE, FormatTime(left, rate))
         lines[#lines + 1] = ("%sTime to level %d: %s%s"):format(LABEL, MaxLevel(), VALUE, FormatTime(toMax, rate))
     end
+    Block(("Last %d min"):format(DB.window or 15), rolling)
     Block("Session XP", session)
     Block("Level XP", levelRate)
     Block("Total XP", totalRate)
@@ -200,7 +237,7 @@ local function XPSummary()
         parts[#parts + 1] = ("~%d kills"):format(KillsToLevel(left, xpState.killXP))
     end
     local session, levelRate = Rates()
-    local rate = session or levelRate
+    local rate = RollingRate() or session or levelRate
     if rate then parts[#parts + 1] = FormatTime(left, rate) end
     return table.concat(parts, "   ")
 end
@@ -310,6 +347,10 @@ xpEvents:SetScript("OnEvent", function(_, event, arg1, arg2)
             xpState.lastXP, xpState.lastMax = UnitXP("player"), UnitXPMax("player")
             xpState.lastLevel = UnitLevel("player")
             xpState.killXP = CHAR.lastKillXP
+            -- Start the rolling window now unless gains from the last few
+            -- minutes are still saved (a /reload or a short break).
+            PruneGains()
+            if #CHAR.recent == 0 or not CHAR.recentStart then CHAR.recentStart = time() end
             C_Timer.After(2, RequestPlayedQuietly)
         end
         UpdateXPLine()
@@ -318,7 +359,10 @@ xpEvents:SetScript("OnEvent", function(_, event, arg1, arg2)
         if xpState.lastXP then
             local gained = level == xpState.lastLevel and cur - xpState.lastXP
                 or (xpState.lastMax - xpState.lastXP) + cur
-            if gained > 0 then xpState.sessionGained = xpState.sessionGained + gained end
+            if gained > 0 then
+                xpState.sessionGained = xpState.sessionGained + gained
+                RecordGain(gained)
+            end
         end
         xpState.lastXP, xpState.lastMax, xpState.lastLevel = cur, max, level
         UpdateXPLine()
@@ -358,10 +402,14 @@ SlashCmdList.ONECLICKXP = function(input)
         if cmd == "" then DB.enabled = DB.enabled == false else DB.enabled = cmd == "on" end
         Print("XP panel: " .. (DB.enabled ~= false and "on" or "off"))
         UpdateXPLine()
+    elseif cmd == "window" and tonumber(arg or "") then
+        DB.window = math.max(5, math.min(60, math.floor(tonumber(arg))))
+        Print(("Rolling rate covers the last %d minutes."):format(DB.window))
+        UpdateXPLine()
     elseif cmd == "collapse" then
         DB.collapsed = not DB.collapsed
         UpdateXPLine()
     else
-        Print("/oxp (show or hide), /oxp on|off, /oxp collapse, /oxp scale 1.2")
+        Print("/oxp (show or hide), /oxp on|off, /oxp collapse, /oxp scale 1.2, /oxp window 15")
     end
 end
