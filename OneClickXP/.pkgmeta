@@ -1,0 +1,4 @@
+package-as: OneClickXP
+
+ignore:
+  - README.md

@@ -1,0 +1,10 @@
+## Interface: 16001, 11509
+## Title: OneClickXP
+## Notes: An on-screen XP panel: rested XP, kills to level, and XP per hour with time to level and to 60 for this session, this level and all time played.
+## Version: 1.0.0
+## OptionalDeps: OneClickBars
+## SavedVariables: OneClickXPDB
+## SavedVariablesPerCharacter: OneClickXPChar
+## IconTexture: Interface\Icons\INV_Misc_PocketWatch_01
+
+OneClickXP.lua

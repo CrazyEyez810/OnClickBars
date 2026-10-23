@@ -2,5 +2,3 @@ package-as: OneClickBars
 
 ignore:
   - README.md
-  - .github
-  - tools
