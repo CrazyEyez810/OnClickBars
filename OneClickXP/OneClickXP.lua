@@ -1,7 +1,7 @@
 -- OneClickXP
 -- An on-screen XP panel: current and rested XP, XP and kills to level, and
 -- XP per hour with time to level and time to max level for this session,
--- this level and all time played. Click STATS to collapse it to one line.
+-- this level and all time played. The corner button collapses it to one line.
 -- Rates: last N minutes = rolling window (the main estimate); session = XP
 -- since login; level = XP into this level over time
 -- played this level; total = all XP earned over total time played.
@@ -249,25 +249,25 @@ local function UpdateXPLine()
     if atMax then return end
     local collapsed = DB.collapsed
     if collapsed then
-        xpFrame.header:SetText(ORANGE .. "STATS  " .. VALUE .. XPSummary() .. "  " .. LABEL .. "[+]")
+        xpFrame.header:SetText(ORANGE .. "STATS  " .. VALUE .. XPSummary())
         xpFrame.text:Hide()
-        xpFrame:SetSize(xpFrame.header:GetStringWidth() + 24, xpFrame.header:GetStringHeight() + 16)
+        xpFrame:SetSize(xpFrame.header:GetStringWidth() + 46, math.max(xpFrame.header:GetStringHeight() + 16, 30))
     else
         local lines = XPLines()
         if not lines then return end
-        xpFrame.header:SetText(ORANGE .. "STATS  " .. LABEL .. "[-]")
+        xpFrame.header:SetText(ORANGE .. "STATS")
         xpFrame.text:SetText(table.concat(lines, "\n"))
         xpFrame.text:Show()
-        local width = math.max(xpFrame.header:GetStringWidth(), xpFrame.text:GetStringWidth())
+        local width = math.max(xpFrame.header:GetStringWidth() + 22, xpFrame.text:GetStringWidth())
         xpFrame:SetSize(width + 24, xpFrame.header:GetStringHeight() + xpFrame.text:GetStringHeight() + 22)
     end
-    xpFrame.toggle:SetSize(xpFrame.header:GetStringWidth(), xpFrame.header:GetStringHeight() + 4)
+    xpFrame.toggle:SetCollapsed(collapsed)
 end
 
 local function CreateXPFrame()
     if xpFrame then return end
     local template = BackdropTemplateMixin and "BackdropTemplate" or nil
-    xpFrame = CreateFrame("Frame", "OneClickBarsXP", UIParent, template)
+    xpFrame = CreateFrame("Frame", "OneClickXPFrame", UIParent, template)
     xpFrame:SetSize(220, 240)
     xpFrame:SetClampedToScreen(true)
     xpFrame:SetMovable(true)
@@ -291,18 +291,51 @@ local function CreateXPFrame()
     xpFrame.text:SetJustifyH("LEFT")
     xpFrame.text:SetSpacing(2)
 
-    -- Clicking the STATS line collapses or opens the panel; dragging it
-    -- still moves the panel.
-    xpFrame.toggle = CreateFrame("Button", nil, xpFrame)
-    xpFrame.toggle:SetPoint("TOPLEFT", xpFrame.header, "TOPLEFT", 0, 2)
-    xpFrame.toggle:RegisterForClicks("LeftButtonUp")
-    xpFrame.toggle:RegisterForDrag("LeftButton")
-    xpFrame.toggle:SetScript("OnClick", function()
+    -- Window-style button in the top-right corner: a dash collapses the
+    -- panel to one line, a small box opens it again.
+    local toggle = CreateFrame("Button", nil, xpFrame)
+    toggle:SetSize(16, 16)
+    toggle:SetPoint("TOPRIGHT", -6, -6)
+    toggle:RegisterForClicks("LeftButtonUp")
+    local bg = toggle:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    bg:SetColorTexture(1, 1, 1, 0)
+    local function Line(w, h, point, x, y)
+        local t = toggle:CreateTexture(nil, "ARTWORK")
+        t:SetColorTexture(0.85, 0.85, 0.85, 1)
+        t:SetSize(w, h)
+        t:SetPoint(point, toggle, "CENTER", x, y)
+        return t
+    end
+    local dash = Line(8, 2, "CENTER", 0, -3)
+    local box = {
+        Line(8, 1, "CENTER", 0, 4),   -- top
+        Line(8, 1, "CENTER", 0, -4),  -- bottom
+        Line(1, 8, "CENTER", -4, 0),  -- left
+        Line(1, 8, "CENTER", 4, 0),   -- right
+    }
+    function toggle:SetCollapsed(collapsed)
+        dash:SetShown(not collapsed)
+        for _, t in ipairs(box) do t:SetShown(collapsed and true or false) end
+    end
+    toggle:SetScript("OnEnter", function()
+        bg:SetColorTexture(1, 1, 1, 0.2)
+        GameTooltip:SetOwner(toggle, "ANCHOR_RIGHT")
+        GameTooltip:SetText(DB.collapsed and "Open" or "Collapse")
+        GameTooltip:Show()
+    end)
+    toggle:SetScript("OnLeave", function()
+        bg:SetColorTexture(1, 1, 1, 0)
+        GameTooltip:Hide()
+    end)
+    toggle:SetScript("OnMouseDown", function() bg:SetColorTexture(1, 1, 1, 0.35) end)
+    toggle:SetScript("OnMouseUp", function() bg:SetColorTexture(1, 1, 1, 0.2) end)
+    toggle:SetScript("OnClick", function()
         DB.collapsed = not DB.collapsed
         UpdateXPLine()
+        GameTooltip:SetText(DB.collapsed and "Open" or "Collapse")
     end)
-    xpFrame.toggle:SetScript("OnDragStart", function() xpFrame:StartMoving() end)
-    xpFrame.toggle:SetScript("OnDragStop", function() xpFrame:GetScript("OnDragStop")(xpFrame) end)
+    xpFrame.toggle = toggle
 
     local pos = DB.pos
     if pos then

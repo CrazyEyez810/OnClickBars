@@ -4,7 +4,7 @@ An on-screen XP panel for WoW Forever. No hovering, no extra panels to install.
 
 It shows current and rested XP, XP to level, kills to level (counting double XP while you're rested), and XP per hour with time to level and time to 60 for the last 15 minutes of play, this session, this level and all time played. The last-15-minutes rate is the main estimate: it follows your current pace and drops old AFK time. The collapsed line uses it too.
 
-Click STATS to collapse it to one line with level %, kills and time to level. Drag it to move it.
+Click the button in the top-right corner to collapse it to one line with level %, kills and time to level, and again to open it. Drag it to move it.
 
 ## Commands
 
