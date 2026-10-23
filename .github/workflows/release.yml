@@ -3,11 +3,13 @@ name: Release
 # Each addon is released by its own tag:
 #   OneClickBars-v1.7.0  packages OneClickBars/
 #   OneClickXP-v1.0.0    packages OneClickXP/
+#   OneClickPace-v0.1.0  packages OneClickPace/
 on:
   push:
     tags:
       - "OneClickBars-v*"
       - "OneClickXP-v*"
+      - "OneClickPace-v*"
 
 jobs:
   release:

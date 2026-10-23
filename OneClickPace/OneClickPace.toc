@@ -1,0 +1,9 @@
+## Interface: 11509, 16001
+## Title: OneClickPace
+## Notes: Tells you when a quest spot is contested: times your quest progress where you stand and says keep going, unlucky drops, or leave and come back later.
+## Version: 0.1.0
+## SavedVariables: OneClickPaceDB
+## SavedVariablesPerCharacter: OneClickPaceChar
+## IconTexture: Interface\Icons\INV_Misc_PocketWatch_02
+
+OneClickPace.lua

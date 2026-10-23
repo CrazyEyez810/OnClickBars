@@ -1,0 +1,4 @@
+package-as: OneClickPace
+
+ignore:
+  - README.md

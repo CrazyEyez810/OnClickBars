@@ -4,6 +4,8 @@ Addons for WoW Forever by CrazyEyez810. Each folder is one addon with its own Cu
 
 - `OneClickBars/` saves your whole setup (bars, keybindings, macros, Edit Mode layout, game and addon settings) and loads it on every new character, with leveling automation for RestedXP and Questie.
 - `OneClickXP/` is an on-screen XP panel with kills to level and time to level.
+- `OneClickPace/` tells you when a quest spot is contested and you should leave and come back later.
+- `tools/test-pace.lua` runs OneClickPace against a fake game: `luajit tools/test-pace.lua OneClickPace/OneClickPace.lua`.
 - `tools/launch-day-copy.sh` copies your addons and their settings from one WoW folder to another, such as from the beta to the live client. Put it in the World of Warcraft folder and run it with WoW closed.
 
 ## Releasing
