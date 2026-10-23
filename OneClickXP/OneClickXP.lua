@@ -297,12 +297,24 @@ local function CreateXPFrame()
     toggle:SetSize(16, 16)
     toggle:SetPoint("TOPRIGHT", -6, -6)
     toggle:RegisterForClicks("LeftButtonUp")
+    local GOLD = { 1, 0.82, 0, 1 }
     local bg = toggle:CreateTexture(nil, "BACKGROUND")
     bg:SetAllPoints()
     bg:SetColorTexture(1, 1, 1, 0)
+    -- 1-pixel gold border around the button.
+    for _, edge in ipairs({
+        { "TOPLEFT", "TOPRIGHT", 0, 1 }, { "BOTTOMLEFT", "BOTTOMRIGHT", 0, 1 },
+        { "TOPLEFT", "BOTTOMLEFT", 1, 0 }, { "TOPRIGHT", "BOTTOMRIGHT", 1, 0 },
+    }) do
+        local t = toggle:CreateTexture(nil, "BORDER")
+        t:SetColorTexture(unpack(GOLD))
+        t:SetPoint(edge[1])
+        t:SetPoint(edge[2])
+        if edge[3] > 0 then t:SetWidth(1) else t:SetHeight(1) end
+    end
     local function Line(w, h, point, x, y)
         local t = toggle:CreateTexture(nil, "ARTWORK")
-        t:SetColorTexture(0.85, 0.85, 0.85, 1)
+        t:SetColorTexture(unpack(GOLD))
         t:SetSize(w, h)
         t:SetPoint(point, toggle, "CENTER", x, y)
         return t
